@@ -2705,19 +2705,22 @@ pub const Arguments = struct {
         flag: FileSystemFlags = FileSystemFlags.w,
         mode: Mode = 0o666,
         file: PathOrFileDescriptor,
-        data: StringOrBuffer,
+        data: JSC.Node.SliceWithUnderlyingStringOrBuffer,
         dirfd: FileDescriptor,
 
         pub fn deinit(self: WriteFile) void {
             self.file.deinit();
+            self.data.deinit();
         }
 
         pub fn toThreadSafe(self: *WriteFile) void {
             self.file.toThreadSafe();
+            self.data.toThreadSafe();
         }
 
         pub fn deinitAndUnprotect(self: *WriteFile) void {
             self.file.deinitAndUnprotect();
+            self.data.deinitAndUnprotect();
         }
 
         pub fn fromJS(ctx: JSC.C.JSContextRef, arguments: *ArgumentsSlice, exception: JSC.C.ExceptionRef) ?WriteFile {
@@ -2735,7 +2738,9 @@ pub const Arguments = struct {
 
             if (exception.* != null) return null;
 
-            const data = StringOrBuffer.fromJS(ctx.ptr(), bun.default_allocator, arguments.next() orelse {
+            const data = JSC.Node.SliceWithUnderlyingStringOrBuffer.fromJS(ctx.ptr(), bun.default_allocator, arguments.next() orelse {
+                file.deinit();
+
                 if (exception.* == null) {
                     JSC.throwInvalidArguments(
                         "data is required",
@@ -2746,6 +2751,8 @@ pub const Arguments = struct {
                 }
                 return null;
             }, exception) orelse {
+                file.deinit();
+
                 if (exception.* == null) {
                     JSC.throwInvalidArguments(
                         "data must be a string or TypedArray",
@@ -2768,6 +2775,8 @@ pub const Arguments = struct {
                 arguments.eat();
                 if (arg.isString()) {
                     encoding = Encoding.fromJS(arg, ctx.ptr()) orelse {
+                        file.deinit();
+                        data.deinit();
                         if (exception.* == null) {
                             JSC.throwInvalidArguments(
                                 "Invalid encoding",
@@ -2781,6 +2790,9 @@ pub const Arguments = struct {
                 } else if (arg.isObject()) {
                     if (arg.getTruthy(ctx.ptr(), "encoding")) |encoding_| {
                         encoding = Encoding.fromJS(encoding_, ctx.ptr()) orelse {
+                            file.deinit();
+                            data.deinit();
+
                             if (exception.* == null) {
                                 JSC.throwInvalidArguments(
                                     "Invalid encoding",
@@ -2795,6 +2807,9 @@ pub const Arguments = struct {
 
                     if (arg.getTruthy(ctx.ptr(), "flag")) |flag_| {
                         flag = FileSystemFlags.fromJS(ctx, flag_, exception) orelse {
+                            file.deinit();
+                            data.deinit();
+
                             if (exception.* == null) {
                                 JSC.throwInvalidArguments(
                                     "Invalid flag",
@@ -2809,6 +2824,9 @@ pub const Arguments = struct {
 
                     if (arg.getTruthy(ctx.ptr(), "mode")) |mode_| {
                         mode = JSC.Node.modeFromJS(ctx, mode_, exception) orelse {
+                            file.deinit();
+                            data.deinit();
+
                             if (exception.* == null) {
                                 JSC.throwInvalidArguments(
                                     "Invalid flag",

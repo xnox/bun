@@ -1645,7 +1645,15 @@ pub fn saveToDisk(this: *Lockfile, filename: stringZ) void {
                     .fd = bun.toFD(file.handle),
                 },
                 .dirfd = if (!Environment.isWindows) bun.invalid_fd else @panic("TODO"),
-                .data = .{ .string = bytes.items },
+                .data = .{
+                    .buffer = .{
+                        .buffer = .{
+                            .ptr = bytes.items.ptr,
+                            .len = @truncate(bytes.items.len),
+                            .byte_len = @truncate(bytes.items.len),
+                        },
+                    },
+                },
             },
             .sync,
         )) {

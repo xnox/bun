@@ -9163,7 +9163,7 @@ const LinkerContext = struct {
                     switch (JSC.Node.NodeFS.writeFileWithPathBuffer(
                         &pathbuf,
                         JSC.Node.Arguments.WriteFile{
-                            .data = JSC.Node.StringOrBuffer{
+                            .data = .{
                                 .buffer = JSC.Buffer{
                                     .buffer = .{
                                         .ptr = @constCast(output_source_map.ptr),
@@ -9231,7 +9231,7 @@ const LinkerContext = struct {
             switch (JSC.Node.NodeFS.writeFileWithPathBuffer(
                 &pathbuf,
                 JSC.Node.Arguments.WriteFile{
-                    .data = JSC.Node.StringOrBuffer{
+                    .data = .{
                         .buffer = JSC.Buffer{
                             .buffer = .{
                                 .ptr = @constCast(code_result.buffer.ptr),
@@ -9302,7 +9302,7 @@ const LinkerContext = struct {
             switch (JSC.Node.NodeFS.writeFileWithPathBuffer(
                 &pathbuf,
                 JSC.Node.Arguments.WriteFile{
-                    .data = JSC.Node.StringOrBuffer{
+                    .data = .{
                         .buffer = JSC.Buffer{
                             .buffer = .{
                                 .ptr = @constCast(react_client_components_manifest.ptr),
@@ -9378,7 +9378,7 @@ const LinkerContext = struct {
                 switch (JSC.Node.NodeFS.writeFileWithPathBuffer(
                     &pathbuf,
                     JSC.Node.Arguments.WriteFile{
-                        .data = JSC.Node.StringOrBuffer{
+                        .data = .{
                             .buffer = JSC.Buffer{
                                 .buffer = .{
                                     .ptr = @constCast(bytes.ptr),

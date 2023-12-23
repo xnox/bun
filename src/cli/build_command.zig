@@ -399,7 +399,7 @@ pub const BuildCommand = struct {
                                 switch (JSC.Node.NodeFS.writeFileWithPathBuffer(
                                     &path_buf,
                                     JSC.Node.Arguments.WriteFile{
-                                        .data = JSC.Node.StringOrBuffer{
+                                        .data = .{
                                             .buffer = JSC.Buffer{
                                                 .buffer = .{
                                                     .ptr = @constCast(value.bytes.ptr),
