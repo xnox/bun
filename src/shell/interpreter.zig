@@ -4109,7 +4109,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     }
 
                     const fd = if (comptime io_kind == .stdout) this.bltn.stdout.expectFd() else this.bltn.stderr.expectFd();
-                    const bw = switch (BufferedFdWriter.init(fd, buf, BufferedWriter.ParentPtr.init(this), this.bltn.stdBufferedBytelist(io_kind))) {
+                    const bw = switch (BufferedWriter.init(fd, buf, BufferedWriter.ParentPtr.init(this), this.bltn.stdBufferedBytelist(io_kind))) {
                         .result => |bw| bw,
                         .err => |e| return .{ .err = e },
                     };
@@ -7403,7 +7403,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 if (uv.uv_pipe_open(&this.pipe.?, bun.uvfdcast(fd)).errEnum()) |e|
                     return .{ .err = Syscall.Error.fromCode(e, .uv_pipe).withFd(fd) };
 
-                return .{ .success = this };
+                return .{ .result = this };
             }
 
             pub fn writeIfPossible(this: *BufferedPipeWriter, comptime is_sync: bool) void {
@@ -7413,12 +7413,16 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             pub fn uvWriteCallback(req: *uv.uv_write_t, status: uv.ReturnCode) callconv(.C) void {
                 const this = bun.cast(*BufferedPipeWriter, req.data);
                 if (this.pipe == null) return;
-                if (status.errEnum()) |_| {
+                if (status.errEnum()) |e| {
                     log("uv_write({d}) fail: {d}", .{ this.remain.len, status.int() });
+                    this.err = Syscall.Error.fromCode(e, .write);
                     this.deinit();
                     return;
                 }
 
+                if (this.bytelist) |blist| {
+                    blist.append(bun.default_allocator, this.remain[0..]) catch bun.outOfMemory();
+                }
                 this.written += this.remain.len;
                 this.remain = "";
                 // we are done!
@@ -7426,7 +7430,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             }
 
             pub fn writeAllowBlocking(this: *BufferedPipeWriter, allow_blocking: bool) void {
-                const pipe = this.pipe orelse return;
+                const pipe = &(this.pipe orelse return);
 
                 var to_write = this.remain;
 
@@ -7480,7 +7484,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     poll.deinit();
                 }
 
-                if (this.pipe) |pipe| {
+                if (this.pipe) |*pipe| {
                     _ = uv.uv_close(@ptrCast(pipe), null);
                     this.pipe = null;
                 }
@@ -7488,15 +7492,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
             pub fn deinit(this: *BufferedPipeWriter) void {
                 this.close();
-
-                switch (this.source) {
-                    .blob => |*blob| {
-                        blob.detach();
-                    },
-                    .array_buffer => |*array_buffer| {
-                        array_buffer.deinit();
-                    },
-                }
+                this.parent.onDone(this.err);
             }
         };
 
