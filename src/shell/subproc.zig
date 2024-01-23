@@ -174,7 +174,9 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
             pub fn unref(this: *Writable) void {
                 switch (this.*) {
                     .pipe => {
-                        if (this.pipe.poll_ref) |poll| {
+                        if (Environment.isWindows) {
+                            _ = uv.uv_unref(@ptrCast(this.pipe.stream));
+                        } else if (this.pipe.poll_ref) |poll| {
                             poll.enableKeepingProcessAlive(get_vm.get());
                         }
                     },
