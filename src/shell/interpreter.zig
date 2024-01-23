@@ -7378,6 +7378,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             remain: []const u8 = "",
             input_buffer: uv.uv_buf_t = std.mem.zeroes(uv.uv_buf_t),
             write_req: uv.uv_write_t = std.mem.zeroes(uv.uv_write_t),
+            uvfd: bun.FileDescriptor,
             pipe: ?uv.uv_pipe_t,
             poll_ref: ?*bun.Async.FilePoll = null,
             written: usize = 0,
@@ -7393,15 +7394,26 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     .parent = parent,
                     .bytelist = bytelist,
                     .pipe = std.mem.zeroes(uv.uv_pipe_t),
+                    .uvfd = bun.invalid_fd,
                 };
+
+                const dupedfd = switch (Syscall.dup(fd)) {
+                    .result => |dup| dup,
+                    .err => |e| return .{ .err = e.withFd(fd) },
+                };
+
+                const uvfd = bun.toLibUVOwnedFD(dupedfd);
 
                 if (uv.uv_pipe_init(uv.Loop.get(), &this.pipe.?, 0) != 0) {
                     // This shouldn't actually happen, checked the libuv source and it always returns 0
                     @panic("Failed to create pipe");
                 }
 
-                if (uv.uv_pipe_open(&this.pipe.?, bun.uvfdcast(fd)).errEnum()) |e|
+                if (uv.uv_pipe_open(&this.pipe.?, bun.uvfdcast(uvfd)).errEnum()) |e| {
                     return .{ .err = Syscall.Error.fromCode(e, .uv_pipe).withFd(fd) };
+                }
+
+                this.uvfd = uvfd;
 
                 return .{ .result = this };
             }
@@ -7487,6 +7499,12 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 if (this.pipe) |*pipe| {
                     _ = uv.uv_close(@ptrCast(pipe), null);
                     this.pipe = null;
+                }
+
+                if (this.uvfd != bun.invalid_fd) {
+                    if (bun.FDImpl.decode(this.uvfd).close()) |e| {
+                        bun.Output.debugWarn("closing uvfd failed: {anytype}", .{e});
+                    }
                 }
             }
 
