@@ -41,6 +41,8 @@ const TaggedPointer = @import("../tagged_pointer.zig").TaggedPointer;
 pub const WorkPoolTask = @import("../work_pool.zig").Task;
 pub const WorkPool = @import("../work_pool.zig").WorkPool;
 const Maybe = @import("../bun.js/node/types.zig").Maybe;
+const windows = bun.windows;
+const uv = windows.libuv;
 
 const Pipe = [2]bun.FileDescriptor;
 const shell = @import("./shell.zig");
@@ -143,6 +145,7 @@ pub const CoroutineResult = enum {
     /// it's okay for the caller to continue its execution
     cont,
     yield,
+    fail,
 };
 
 pub const IO = struct {
@@ -7235,11 +7238,208 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             };
         };
 
+        pub const BufferedWriterParentPtr = struct {
+            const Types = .{
+                BuiltinJs.Export,
+                BuiltinJs.Echo,
+                BuiltinJs.Cd,
+                BuiltinJs.Which,
+                BuiltinJs.Rm,
+                BuiltinJs.Pwd,
+                BuiltinJs.Mv,
+                BuiltinJs.Ls,
+                BuiltinMini.Export,
+                BuiltinMini.Echo,
+                BuiltinMini.Cd,
+                BuiltinMini.Which,
+                BuiltinMini.Rm,
+                BuiltinMini.Pwd,
+                BuiltinMini.Mv,
+                BuiltinMini.Ls,
+                CmdJs,
+                CmdMini,
+                PipelineJs,
+                PipelineMini,
+            };
+            ptr: Repr,
+            pub const Repr = TaggedPointerUnion(Types);
+            const ParentPtr = @This();
+            const CmdJs = bun.shell.Interpreter.Cmd;
+            const CmdMini = bun.shell.InterpreterMini.Cmd;
+            const PipelineJs = bun.shell.Interpreter.Pipeline;
+            const PipelineMini = bun.shell.InterpreterMini.Pipeline;
+            const BuiltinJs = bun.shell.Interpreter.Builtin;
+            const BuiltinMini = bun.shell.InterpreterMini.Builtin;
+
+            pub fn underlying(this: ParentPtr) type {
+                inline for (Types) |Ty| {
+                    if (this.ptr.is(Ty)) return Ty;
+                }
+                @panic("Uh oh");
+            }
+
+            pub fn init(p: anytype) ParentPtr {
+                return .{
+                    .ptr = Repr.init(p),
+                };
+            }
+
+            pub fn onDone(this: ParentPtr, e: ?Syscall.Error) void {
+                if (this.ptr.is(BuiltinJs.Export)) return this.ptr.as(BuiltinJs.Export).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinJs.Echo)) return this.ptr.as(BuiltinJs.Echo).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinJs.Cd)) return this.ptr.as(BuiltinJs.Cd).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinJs.Which)) return this.ptr.as(BuiltinJs.Which).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinJs.Rm)) return this.ptr.as(BuiltinJs.Rm).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinJs.Pwd)) return this.ptr.as(BuiltinJs.Pwd).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinJs.Mv)) return this.ptr.as(BuiltinJs.Mv).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinJs.Ls)) return this.ptr.as(BuiltinJs.Ls).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinMini.Export)) return this.ptr.as(BuiltinMini.Export).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinMini.Echo)) return this.ptr.as(BuiltinMini.Echo).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinMini.Cd)) return this.ptr.as(BuiltinMini.Cd).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinMini.Which)) return this.ptr.as(BuiltinMini.Which).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinMini.Rm)) return this.ptr.as(BuiltinMini.Rm).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinMini.Pwd)) return this.ptr.as(BuiltinMini.Pwd).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinMini.Mv)) return this.ptr.as(BuiltinMini.Mv).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinMini.Ls)) return this.ptr.as(BuiltinMini.Ls).onBufferedWriterDone(e);
+                if (this.ptr.is(CmdJs)) return this.ptr.as(CmdJs).onBufferedWriterDone(e);
+                if (this.ptr.is(CmdMini)) return this.ptr.as(CmdMini).onBufferedWriterDone(e);
+                @panic("Invalid ptr tag");
+            }
+        };
+
+        const BufferedWriter = if (bun.Environment.isWindows) BufferedPipeWriter else BufferedFdWriter;
+
+        pub const BufferedPipeWriter = struct {
+            remain: []const u8 = "",
+            input_buffer: uv.uv_buf_t = std.mem.zeroes(uv.uv_buf_t),
+            write_req: uv.uv_write_t = std.mem.zeroes(uv.uv_write_t),
+            pipe: ?uv.uv_pipe_t,
+            poll_ref: ?*bun.Async.FilePoll = null,
+            written: usize = 0,
+
+            parent: ParentPtr,
+            err: ?Syscall.Error = null,
+            bytelist: ?*bun.ByteList = null,
+            const ParentPtr = BufferedWriterParentPtr;
+
+            pub fn init(fd: bun.FileDescriptor, remain: []const u8, parent: ParentPtr, bytelist: ?*bun.ByteList) Maybe(BufferedPipeWriter) {
+                var this: @This() = .{
+                    .remain = remain,
+                    .parent = parent,
+                    .bytelist = bytelist,
+                    .pipe = std.mem.zeroes(uv.uv_pipe_t),
+                };
+
+                if (uv.uv_pipe_init(uv.Loop.get(), &this.pipe.?, 0) != 0) {
+                    // This shouldn't actually happen, checked the libuv source and it always returns 0
+                    @panic("Failed to create pipe");
+                }
+
+                if (uv.uv_pipe_open(&this.pipe.?, bun.uvfdcast(fd)).errEnum()) |e|
+                    return .{ .err = Syscall.Error.fromCode(e, .uv_pipe).withFd(fd) };
+
+                return .{ .success = this };
+            }
+
+            pub fn writeIfPossible(this: *BufferedPipeWriter, comptime is_sync: bool) void {
+                this.writeAllowBlocking(is_sync);
+            }
+
+            pub fn uvWriteCallback(req: *uv.uv_write_t, status: uv.ReturnCode) callconv(.C) void {
+                const this = bun.cast(*BufferedPipeWriter, req.data);
+                if (this.pipe == null) return;
+                if (status.errEnum()) |_| {
+                    log("uv_write({d}) fail: {d}", .{ this.remain.len, status.int() });
+                    this.deinit();
+                    return;
+                }
+
+                this.written += this.remain.len;
+                this.remain = "";
+                // we are done!
+                this.close();
+            }
+
+            pub fn writeAllowBlocking(this: *BufferedPipeWriter, allow_blocking: bool) void {
+                const pipe = this.pipe orelse return;
+
+                var to_write = this.remain;
+
+                this.input_buffer = uv.uv_buf_t.init(to_write);
+                if (allow_blocking) {
+                    while (true) {
+                        if (to_write.len == 0) {
+                            // we are done!
+                            this.close();
+                            return;
+                        }
+                        const status = uv.uv_try_write(@ptrCast(pipe), @ptrCast(&this.input_buffer), 1);
+                        if (status.errEnum()) |err| {
+                            if (err == bun.C.E.AGAIN) {
+                                //EAGAIN
+                                this.write_req.data = this;
+                                const write_err = uv.uv_write(&this.write_req, @ptrCast(pipe), @ptrCast(&this.input_buffer), 1, BufferedPipeWriter.uvWriteCallback).int();
+                                if (write_err < 0) {
+                                    log("uv_write({d}) fail: {d}", .{ this.remain.len, write_err });
+                                    this.deinit();
+                                }
+                                return;
+                            }
+                            // fail
+                            log("uv_try_write({d}) fail: {d}", .{ to_write.len, status.int() });
+                            this.deinit();
+                            return;
+                        }
+                        const bytes_written: usize = @intCast(status.int());
+                        this.written += bytes_written;
+                        this.remain = this.remain[@min(bytes_written, this.remain.len)..];
+                        to_write = to_write[bytes_written..];
+                    }
+                } else {
+                    this.write_req.data = this;
+                    const err = uv.uv_write(&this.write_req, @ptrCast(pipe), @ptrCast(&this.input_buffer), 1, BufferedPipeWriter.uvWriteCallback).int();
+                    if (err < 0) {
+                        log("uv_write({d}) fail: {d}", .{ this.remain.len, err });
+                        this.deinit();
+                    }
+                }
+            }
+
+            pub fn write(this: *BufferedPipeWriter) void {
+                this.writeAllowBlocking(false);
+            }
+
+            fn close(this: *BufferedPipeWriter) void {
+                if (this.poll_ref) |poll| {
+                    this.poll_ref = null;
+                    poll.deinit();
+                }
+
+                if (this.pipe) |pipe| {
+                    _ = uv.uv_close(@ptrCast(pipe), null);
+                    this.pipe = null;
+                }
+            }
+
+            pub fn deinit(this: *BufferedPipeWriter) void {
+                this.close();
+
+                switch (this.source) {
+                    .blob => |*blob| {
+                        blob.detach();
+                    },
+                    .array_buffer => |*array_buffer| {
+                        array_buffer.deinit();
+                    },
+                }
+            }
+        };
+
         /// This is modified version of BufferedInput for file descriptors only.
         ///
         /// This struct cleans itself up when it is done, so no need to call `.deinit()` on
         /// it. IT DOES NOT CLOSE FILE DESCRIPTORS
-        pub const BufferedWriter =
+        pub const BufferedFdWriter =
             struct {
             remain: []const u8 = "",
             fd: bun.FileDescriptor,
@@ -7251,83 +7451,27 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             bytelist: ?*bun.ByteList = null,
 
             const print = bun.Output.scoped(.BufferedWriter, false);
-            const CmdJs = bun.shell.Interpreter.Cmd;
-            const CmdMini = bun.shell.InterpreterMini.Cmd;
-            const PipelineJs = bun.shell.Interpreter.Pipeline;
-            const PipelineMini = bun.shell.InterpreterMini.Pipeline;
-            const BuiltinJs = bun.shell.Interpreter.Builtin;
-            const BuiltinMini = bun.shell.InterpreterMini.Builtin;
+            const ParentPtr = BufferedWriterParentPtr;
 
-            pub const ParentPtr = struct {
-                const Types = .{
-                    BuiltinJs.Export,
-                    BuiltinJs.Echo,
-                    BuiltinJs.Cd,
-                    BuiltinJs.Which,
-                    BuiltinJs.Rm,
-                    BuiltinJs.Pwd,
-                    BuiltinJs.Mv,
-                    BuiltinJs.Ls,
-                    BuiltinMini.Export,
-                    BuiltinMini.Echo,
-                    BuiltinMini.Cd,
-                    BuiltinMini.Which,
-                    BuiltinMini.Rm,
-                    BuiltinMini.Pwd,
-                    BuiltinMini.Mv,
-                    BuiltinMini.Ls,
-                    CmdJs,
-                    CmdMini,
-                    PipelineJs,
-                    PipelineMini,
-                };
-                ptr: Repr,
-                pub const Repr = TaggedPointerUnion(Types);
-
-                pub fn underlying(this: ParentPtr) type {
-                    inline for (Types) |Ty| {
-                        if (this.ptr.is(Ty)) return Ty;
-                    }
-                    @panic("Uh oh");
-                }
-
-                pub fn init(p: anytype) ParentPtr {
-                    return .{
-                        .ptr = Repr.init(p),
-                    };
-                }
-
-                pub fn onDone(this: ParentPtr, e: ?Syscall.Error) void {
-                    if (this.ptr.is(BuiltinJs.Export)) return this.ptr.as(BuiltinJs.Export).onBufferedWriterDone(e);
-                    if (this.ptr.is(BuiltinJs.Echo)) return this.ptr.as(BuiltinJs.Echo).onBufferedWriterDone(e);
-                    if (this.ptr.is(BuiltinJs.Cd)) return this.ptr.as(BuiltinJs.Cd).onBufferedWriterDone(e);
-                    if (this.ptr.is(BuiltinJs.Which)) return this.ptr.as(BuiltinJs.Which).onBufferedWriterDone(e);
-                    if (this.ptr.is(BuiltinJs.Rm)) return this.ptr.as(BuiltinJs.Rm).onBufferedWriterDone(e);
-                    if (this.ptr.is(BuiltinJs.Pwd)) return this.ptr.as(BuiltinJs.Pwd).onBufferedWriterDone(e);
-                    if (this.ptr.is(BuiltinJs.Mv)) return this.ptr.as(BuiltinJs.Mv).onBufferedWriterDone(e);
-                    if (this.ptr.is(BuiltinJs.Ls)) return this.ptr.as(BuiltinJs.Ls).onBufferedWriterDone(e);
-                    if (this.ptr.is(BuiltinMini.Export)) return this.ptr.as(BuiltinMini.Export).onBufferedWriterDone(e);
-                    if (this.ptr.is(BuiltinMini.Echo)) return this.ptr.as(BuiltinMini.Echo).onBufferedWriterDone(e);
-                    if (this.ptr.is(BuiltinMini.Cd)) return this.ptr.as(BuiltinMini.Cd).onBufferedWriterDone(e);
-                    if (this.ptr.is(BuiltinMini.Which)) return this.ptr.as(BuiltinMini.Which).onBufferedWriterDone(e);
-                    if (this.ptr.is(BuiltinMini.Rm)) return this.ptr.as(BuiltinMini.Rm).onBufferedWriterDone(e);
-                    if (this.ptr.is(BuiltinMini.Pwd)) return this.ptr.as(BuiltinMini.Pwd).onBufferedWriterDone(e);
-                    if (this.ptr.is(BuiltinMini.Mv)) return this.ptr.as(BuiltinMini.Mv).onBufferedWriterDone(e);
-                    if (this.ptr.is(BuiltinMini.Ls)) return this.ptr.as(BuiltinMini.Ls).onBufferedWriterDone(e);
-                    if (this.ptr.is(CmdJs)) return this.ptr.as(CmdJs).onBufferedWriterDone(e);
-                    if (this.ptr.is(CmdMini)) return this.ptr.as(CmdMini).onBufferedWriterDone(e);
-                    @panic("Invalid ptr tag");
-                }
-            };
-
-            pub fn isDone(this: *BufferedWriter) bool {
+            pub fn isDone(this: *BufferedFdWriter) bool {
                 return this.remain.len == 0 or this.err != null;
             }
 
             pub const event_loop_kind = EventLoopKind;
-            pub usingnamespace JSC.WebCore.NewReadyWatcher(BufferedWriter, .writable, onReady);
+            pub usingnamespace JSC.WebCore.NewReadyWatcher(BufferedFdWriter, .writable, onReady);
 
-            pub fn onReady(this: *BufferedWriter, _: i64) void {
+            pub fn init(fd: bun.FileDescriptor, remain: []const u8, parent: ParentPtr, bytelist: ?*bun.ByteList) Maybe(BufferedFdWriter) {
+                const this: @This() = .{
+                    .fd = fd,
+                    .remain = remain,
+                    .parent = parent,
+                    .bytelist = bytelist,
+                };
+
+                return .{ .success = this };
+            }
+
+            pub fn onReady(this: *BufferedFdWriter, _: i64) void {
                 if (this.fd == bun.invalid_fd) {
                     return;
                 }
@@ -7335,7 +7479,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 this.__write();
             }
 
-            pub fn writeIfPossible(this: *BufferedWriter, comptime is_sync: bool) void {
+            pub fn writeIfPossible(this: *BufferedFdWriter, comptime is_sync: bool) void {
                 if (this.remain.len == 0) return this.deinit();
                 if (comptime !is_sync) {
                     // we ask, "Is it possible to write right now?"
@@ -7368,11 +7512,11 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             /// `writeIfPossible()` first, which will check if the fd is writable. If so
             /// it will then call this function, if not, then it will poll for the fd to
             /// be writable
-            pub fn __write(this: *BufferedWriter) void {
+            pub fn __write(this: *BufferedFdWriter) void {
                 this.writeAllowBlocking(false);
             }
 
-            pub fn writeAllowBlocking(this: *BufferedWriter, allow_blocking: bool) void {
+            pub fn writeAllowBlocking(this: *BufferedFdWriter, allow_blocking: bool) void {
                 var to_write = this.remain;
 
                 if (to_write.len == 0) {
@@ -7438,7 +7582,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 }
             }
 
-            fn close(this: *BufferedWriter) void {
+            fn close(this: *BufferedFdWriter) void {
                 if (this.poll_ref) |poll| {
                     this.poll_ref = null;
                     poll.deinit();
@@ -7450,7 +7594,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 }
             }
 
-            pub fn deinit(this: *BufferedWriter) void {
+            pub fn deinit(this: *BufferedFdWriter) void {
                 this.close();
                 this.parent.onDone(this.err);
             }
