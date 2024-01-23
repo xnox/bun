@@ -13,6 +13,8 @@ const Which = @import("../which.zig");
 const Output = @import("root").bun.Output;
 const PosixSpawn = @import("../bun.js/api/bun/spawn.zig").PosixSpawn;
 const os = std.os;
+const windows = bun.windows;
+const uv = windows.libuv;
 
 pub const OutKind = enum { stdout, stderr };
 
@@ -77,6 +79,77 @@ pub const Stdio = union(enum) {
                 try actions.openZ(std_fileno, "/dev/null", flag, 0o664);
             },
         }
+    }
+
+    fn setUpChildIoUvSpawn(
+        stdio: @This(),
+        std_fileno: i32,
+        pipe: *uv.uv_pipe_t,
+        isReadable: bool,
+        fd: bun.FileDescriptor,
+    ) !uv.uv_stdio_container_s {
+        return switch (stdio) {
+            .array_buffer, .blob, .pipe => {
+                if (uv.uv_pipe_init(uv.Loop.get(), pipe, 0) != 0) {
+                    return error.FailedToCreatePipe;
+                }
+                if (fd != bun.invalid_fd) {
+                    // we receive a FD so we open this into our pipe
+                    if (uv.uv_pipe_open(pipe, bun.uvfdcast(fd)).errEnum()) |_| {
+                        return error.FailedToCreatePipe;
+                    }
+                    return uv.uv_stdio_container_s{
+                        .flags = @intCast(uv.UV_INHERIT_STREAM),
+                        .data = .{ .stream = @ptrCast(pipe) },
+                    };
+                }
+                // we dont have any fd so we create a new pipe
+                return uv.uv_stdio_container_s{
+                    .flags = @intCast(uv.UV_CREATE_PIPE | if (isReadable) uv.UV_READABLE_PIPE else uv.UV_WRITABLE_PIPE),
+                    .data = .{ .stream = @ptrCast(pipe) },
+                };
+            },
+            .inherit => {
+                if (stdio.inherit.captured != null) {
+                    if (uv.uv_pipe_init(uv.Loop.get(), pipe, 0) != 0) {
+                        return error.FailedToCreatePipe;
+                    }
+                    if (fd != bun.invalid_fd) {
+                        // we receive a FD so we open this into our pipe
+                        if (uv.uv_pipe_open(pipe, bun.uvfdcast(fd)).errEnum()) |_| {
+                            return error.FailedToCreatePipe;
+                        }
+                        return uv.uv_stdio_container_s{
+                            .flags = @intCast(uv.UV_INHERIT_STREAM),
+                            .data = .{ .stream = @ptrCast(pipe) },
+                        };
+                    }
+                    // we dont have any fd so we create a new pipe
+                    return uv.uv_stdio_container_s{
+                        .flags = @intCast(uv.UV_CREATE_PIPE | if (isReadable) uv.UV_READABLE_PIPE else uv.UV_WRITABLE_PIPE),
+                        .data = .{ .stream = @ptrCast(pipe) },
+                    };
+                }
+
+                return uv.uv_stdio_container_s{
+                    .flags = uv.UV_INHERIT_FD,
+                    .data = .{ .fd = std_fileno },
+                };
+            },
+            .fd => |_fd| uv.uv_stdio_container_s{
+                .flags = uv.UV_INHERIT_FD,
+                .data = .{ .fd = bun.uvfdcast(_fd) },
+            },
+            .path => |pathlike| {
+                _ = pathlike;
+                @panic("TODO");
+            },
+            .ignore => uv.uv_stdio_container_s{
+                .flags = uv.UV_IGNORE,
+                .data = undefined,
+            },
+            .memfd => unreachable,
+        };
     }
 };
 

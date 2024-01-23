@@ -1386,7 +1386,7 @@ pub const Subprocess = struct {
         }
         fn flushBufferedDataIntoReadableStream(this: *BufferedOutput) void {
             if (this.readable_stream_ref.get()) |readable| {
-                if(readable.ptr != .Bytes) return;
+                if (readable.ptr != .Bytes) return;
 
                 const internal_buffer = this.internal_buffer;
                 const isDone = this.status != .pending;
