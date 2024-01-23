@@ -148,6 +148,11 @@ pub const CoroutineResult = enum {
     fail,
 };
 
+pub const Yield = enum {
+    yield,
+    fail,
+};
+
 pub const IO = struct {
     stdin: Kind = .{ .std = .{} },
     stdout: Kind = .{ .std = .{} },
@@ -576,6 +581,10 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 this.deinitImpl(true, true);
             }
 
+            pub fn deinitFail(this: *ShellState) void {
+                _ = this;
+            }
+
             /// If called by interpreter we have to:
             /// 1. not free this *ShellState, because its on a field on the interpreter
             /// 2. don't free buffered_stdout and buffered_stderr, because that is used for output
@@ -759,6 +768,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         return .yield;
                     },
                     .yield => return .yield,
+                    .fail => return .fail,
                 }
             }
 
@@ -776,20 +786,25 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                 switch (io.*) {
                     .std => |val| {
-                        const bw = BufferedWriter{
-                            .fd = if (iotype == .stdout) bun.STDOUT_FD else bun.STDERR_FD,
-                            .remain = buf,
-                            .parent = BufferedWriter.ParentPtr.init(ctx),
-                            .bytelist = val.captured,
+                        const fd = if (iotype == .stdout) bun.STDOUT_FD else bun.STDERR_FD;
+                        const bw = switch (BufferedWriter.init(fd, buf, BufferedWriter.ParentPtr.init(ctx), val.captured)) {
+                            .result => |bw| bw,
+                            .err => |e| {
+                                global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(e));
+                                return .fail;
+                            },
                         };
                         handleIOWrite(ctx, bw);
                         return .yield;
                     },
                     .fd => {
-                        const bw = BufferedWriter{
-                            .fd = if (iotype == .stdout) bun.STDOUT_FD else bun.STDERR_FD,
-                            .remain = buf,
-                            .parent = BufferedWriter.ParentPtr.init(ctx),
+                        const fd = if (iotype == .stdout) bun.STDOUT_FD else bun.STDERR_FD;
+                        const bw = switch (BufferedWriter.init(fd, buf, BufferedWriter.ParentPtr.init(ctx), null)) {
+                            .result => |bw| bw,
+                            .err => |e| {
+                                global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(e));
+                                return .fail;
+                            },
                         };
                         handleIOWrite(ctx, bw);
                         return .yield;
@@ -2962,30 +2977,6 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     }
                 };
                 _ = this.base.shell.writeFailingError(buf, this, HandleIOWrite.run);
-
-                // switch (this.base.shell.io.stderr) {
-                //     .std => |val| {
-                //         this.state = .{ .waiting_write_err = BufferedWriter{
-                //             .fd = stderr_no,
-                //             .remain = buf,
-                //             .parent = BufferedWriter.ParentPtr.init(this),
-                //             .bytelist = val.captured,
-                //         } };
-                //         this.state.waiting_write_err.writeIfPossible(false);
-                //     },
-                //     .fd => {
-                //         this.state = .{ .waiting_write_err = BufferedWriter{
-                //             .fd = stderr_no,
-                //             .remain = buf,
-                //             .parent = BufferedWriter.ParentPtr.init(this),
-                //         } };
-                //         this.state.waiting_write_err.writeIfPossible(false);
-                //     },
-                //     .pipe, .ignore => {
-                //         this.parent.childDone(this, 1);
-                //     },
-                // }
-                return;
             }
 
             pub fn init(
@@ -3229,7 +3220,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             .result => {},
                             .err => |e| {
                                 const buf = std.fmt.allocPrint(this.spawn_arena.allocator(), "bun: {s}: {s}", .{ @tagName(this.exec.bltn.kind), e.toSystemError().message }) catch bun.outOfMemory();
-                                this.writeFailingError(buf, 1);
+                                _ = this.writeFailingError(buf, 1);
                                 return;
                             },
                         }
@@ -3239,7 +3230,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     var path_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
                     const resolved = which(&path_buf, spawn_args.PATH, spawn_args.cwd, first_arg[0..first_arg_len]) orelse {
                         const buf = std.fmt.allocPrint(arena_allocator, "bun: command not found: {s}\n", .{first_arg}) catch bun.outOfMemory();
-                        this.writeFailingError(buf, 1);
+                        _ = this.writeFailingError(buf, 1);
                         return;
                     };
 
@@ -3337,7 +3328,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         .atom => {
                             if (this.redirection_file.items.len == 0) {
                                 const buf = std.fmt.allocPrint(spawn_args.arena.allocator(), "bun: ambiguous redirect: at `{s}`\n", .{spawn_args.argv.items[0] orelse "<unknown>"}) catch bun.outOfMemory();
-                                this.writeFailingError(buf, 1);
+                                _ = this.writeFailingError(buf, 1);
                                 return;
                             }
                             const path = this.redirection_file.items[0..this.redirection_file.items.len -| 1 :0];
@@ -3347,7 +3338,8 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             const redirfd = switch (Syscall.openat(this.base.shell.cwd_fd, path, std.os.O.WRONLY | std.os.O.CREAT | extra, perm)) {
                                 .err => |e| {
                                     const buf = std.fmt.allocPrint(this.spawn_arena.allocator(), "bun: {s}: {s}", .{ e.toSystemError().message, path }) catch bun.outOfMemory();
-                                    return this.writeFailingError(buf, 1);
+                                    _ = this.writeFailingError(buf, 1);
+                                    return;
                                 },
                                 .result => |f| f,
                             };
@@ -4116,14 +4108,16 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         return Maybe(void).success;
                     }
 
-                    this.print_state = .{
-                        .bufwriter = BufferedWriter{
-                            .remain = buf,
-                            .fd = if (comptime io_kind == .stdout) this.bltn.stdout.expectFd() else this.bltn.stderr.expectFd(),
-                            .parent = BufferedWriter.ParentPtr{ .ptr = BufferedWriter.ParentPtr.Repr.init(this) },
-                            .bytelist = this.bltn.stdBufferedBytelist(io_kind),
-                        },
+                    const fd = if (comptime io_kind == .stdout) this.bltn.stdout.expectFd() else this.bltn.stderr.expectFd();
+                    const bw = switch (BufferedFdWriter.init(fd, buf, BufferedWriter.ParentPtr.init(this), this.bltn.stdBufferedBytelist(io_kind))) {
+                        .result => |bw| bw,
+                        .err => |e| return .{ .err = e },
                     };
+
+                    this.print_state = .{
+                        .bufwriter = bw,
+                    };
+
                     this.print_state.?.bufwriter.writeIfPossible(false);
                     return Maybe(void).success;
                 }
@@ -4188,13 +4182,14 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                         if (comptime bun.Environment.allow_assert) {}
 
+                        const fd = this.bltn.stdout.expectFd();
+                        const bw = switch (BufferedWriter.init(fd, buf, BufferedWriterParentPtr.init(this), this.bltn.stdBufferedBytelist(.stdout))) {
+                            .result => |bw| bw,
+                            .err => |e| return .{ .err = e },
+                        };
+
                         this.print_state = .{
-                            .bufwriter = BufferedWriter{
-                                .remain = buf,
-                                .fd = this.bltn.stdout.expectFd(),
-                                .parent = BufferedWriter.ParentPtr{ .ptr = BufferedWriter.ParentPtr.Repr.init(this) },
-                                .bytelist = this.bltn.stdBufferedBytelist(.stdout),
-                            },
+                            .bufwriter = bw,
                         };
 
                         this.print_state.?.bufwriter.writeIfPossible(false);
@@ -4283,11 +4278,9 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         return Maybe(void).success;
                     }
 
-                    this.io_write_state = BufferedWriter{
-                        .fd = this.bltn.stdout.expectFd(),
-                        .remain = this.output.items[0..],
-                        .parent = BufferedWriter.ParentPtr.init(this),
-                        .bytelist = this.bltn.stdBufferedBytelist(.stdout),
+                    this.io_write_state = switch (BufferedWriter.init(this.bltn.stdout.expectFd(), this.output.items[0..], BufferedWriter.ParentPtr.init(this), this.bltn.stdBufferedBytelist(.stdout))) {
+                        .err => |e| return .{ .err = e },
+                        .result => |bw| bw,
                     };
                     this.state = .waiting;
                     this.io_write_state.?.writeIfPossible(false);
@@ -4353,11 +4346,14 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         }
                         this.state = .{
                             .one_arg = .{
-                                .writer = BufferedWriter{
-                                    .fd = this.bltn.stdout.expectFd(),
-                                    .remain = "\n",
-                                    .parent = BufferedWriter.ParentPtr.init(this),
-                                    .bytelist = this.bltn.stdBufferedBytelist(.stdout),
+                                .writer = switch (BufferedWriter.init(
+                                    this.bltn.stdout.expectFd(),
+                                    "\n",
+                                    BufferedWriter.ParentPtr.init(this),
+                                    this.bltn.stdBufferedBytelist(.stdout),
+                                )) {
+                                    .result => |bw| bw,
+                                    .err => |e| return .{ .err = e },
                                 },
                             },
                         };
@@ -4419,11 +4415,17 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         const buf = this.bltn.fmtErrorArena(null, "{s} not found\n", .{arg});
                         multiargs.had_not_found = true;
                         multiargs.state = .{
-                            .waiting_write = BufferedWriter{
-                                .fd = this.bltn.stdout.expectFd(),
-                                .remain = buf,
-                                .parent = BufferedWriter.ParentPtr.init(this),
-                                .bytelist = this.bltn.stdBufferedBytelist(.stdout),
+                            .waiting_write = switch (BufferedWriter.init(
+                                this.bltn.stdout.expectFd(),
+                                buf,
+                                BufferedWriter.ParentPtr.init(this),
+                                this.bltn.stdBufferedBytelist(.stdout),
+                            )) {
+                                .result => |bw| bw,
+                                .err => |e| {
+                                    global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(e));
+                                    return;
+                                },
                             },
                         };
                         multiargs.state.waiting_write.writeIfPossible(false);
@@ -4433,11 +4435,17 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                     const buf = this.bltn.fmtErrorArena(null, "{s}\n", .{resolved});
                     multiargs.state = .{
-                        .waiting_write = BufferedWriter{
-                            .fd = this.bltn.stdout.expectFd(),
-                            .remain = buf,
-                            .parent = BufferedWriter.ParentPtr.init(this),
-                            .bytelist = this.bltn.stdBufferedBytelist(.stdout),
+                        .waiting_write = switch (BufferedWriter.init(
+                            this.bltn.stdout.expectFd(),
+                            buf,
+                            BufferedWriter.ParentPtr.init(this),
+                            this.bltn.stdBufferedBytelist(.stdout),
+                        )) {
+                            .result => |bw| bw,
+                            .err => |e| {
+                                global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(e));
+                                return;
+                            },
                         },
                     };
                     multiargs.state.waiting_write.writeIfPossible(false);
@@ -4496,25 +4504,32 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     err: Syscall.Error,
                 } = .idle,
 
-                fn writeStderrNonBlocking(this: *Cd, buf: []u8) void {
+                fn writeStderrNonBlocking(this: *Cd, buf: []u8) Yield {
                     this.state = .{
                         .waiting_write_stderr = .{
-                            .buffered_writer = BufferedWriter{
-                                .fd = this.bltn.stderr.expectFd(),
-                                .remain = buf,
-                                .parent = BufferedWriter.ParentPtr.init(this),
-                                .bytelist = this.bltn.stdBufferedBytelist(.stderr),
+                            .buffered_writer = switch (BufferedWriter.init(
+                                this.bltn.stderr.expectFd(),
+                                buf,
+                                BufferedWriter.ParentPtr.init(this),
+                                this.bltn.stdBufferedBytelist(.stderr),
+                            )) {
+                                .result => |bw| bw,
+                                .err => |e| {
+                                    global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(e));
+                                    return .fail;
+                                },
                             },
                         },
                     };
                     this.state.waiting_write_stderr.buffered_writer.writeIfPossible(false);
+                    return .yield;
                 }
 
                 pub fn start(this: *Cd) Maybe(void) {
                     const args = this.bltn.argsSlice();
                     if (args.len > 1) {
                         const buf = this.bltn.fmtErrorArena(.cd, "too many arguments", .{});
-                        this.writeStderrNonBlocking(buf);
+                        _ = this.writeStderrNonBlocking(buf);
                         // yield execution
                         return Maybe(void).success;
                     }
@@ -4565,7 +4580,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                 return Maybe(void).success;
                             }
 
-                            this.writeStderrNonBlocking(buf);
+                            _ = this.writeStderrNonBlocking(buf);
                             return Maybe(void).success;
                         },
                         @as(usize, @intFromEnum(bun.C.E.NOENT)) => {
@@ -4581,7 +4596,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                 return Maybe(void).success;
                             }
 
-                            this.writeStderrNonBlocking(buf);
+                            _ = this.writeStderrNonBlocking(buf);
                             return Maybe(void).success;
                         },
                         else => return Maybe(void).success,
@@ -4629,11 +4644,14 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             this.state = .{
                                 .waiting_io = .{
                                     .kind = .stderr,
-                                    .writer = BufferedWriter{
-                                        .fd = this.bltn.stderr.expectFd(),
-                                        .remain = msg,
-                                        .parent = BufferedWriter.ParentPtr.init(this),
-                                        .bytelist = this.bltn.stdBufferedBytelist(.stderr),
+                                    .writer = switch (BufferedWriter.init(
+                                        this.bltn.stderr.expectFd(),
+                                        msg,
+                                        BufferedWriter.ParentPtr.init(this),
+                                        this.bltn.stdBufferedBytelist(.stderr),
+                                    )) {
+                                        .result => |bw| bw,
+                                        .err => |e| return .{ .err = e },
                                     },
                                 },
                             };
@@ -4655,11 +4673,14 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         this.state = .{
                             .waiting_io = .{
                                 .kind = .stdout,
-                                .writer = BufferedWriter{
-                                    .fd = this.bltn.stdout.expectFd(),
-                                    .remain = buf,
-                                    .parent = BufferedWriter.ParentPtr.init(this),
-                                    .bytelist = this.bltn.stdBufferedBytelist(.stdout),
+                                .writer = switch (BufferedWriter.init(
+                                    this.bltn.stdout.expectFd(),
+                                    buf,
+                                    BufferedWriter.ParentPtr.init(this),
+                                    this.bltn.stdBufferedBytelist(.stdout),
+                                )) {
+                                    .result => |bw| bw,
+                                    .err => |e| return .{ .err = e },
                                 },
                             },
                         };
@@ -4749,14 +4770,12 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                 pub fn writeFailingError(this: *Ls, buf: []const u8, exit_code: ExitCode) Maybe(void) {
                     if (this.bltn.stderr.needsIO()) {
-                        this.state = .{
-                            .waiting_write_err = BufferedWriter{
-                                .fd = this.bltn.stderr.expectFd(),
-                                .remain = buf,
-                                .parent = BufferedWriter.ParentPtr.init(this),
-                                .bytelist = this.bltn.stdBufferedBytelist(.stderr),
-                            },
+                        const fd = this.bltn.stderr.expectFd();
+                        const bw = switch (BufferedWriter.init(fd, buf, BufferedWriter.ParentPtr.init(this), this.bltn.stdBufferedBytelist(.stderr))) {
+                            .result => |bw| bw,
+                            .err => |e| return .{ .err = e.withFd(fd) },
                         };
+                        this.state = .{ .waiting_write_err = bw };
                         this.state.waiting_write_err.writeIfPossible(false);
                         return Maybe(void).success;
                     }
@@ -4900,11 +4919,17 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         if (this.bltn.stderr.needsIO()) {
                             queued = true;
                             const blocking_output: BlockingOutput = .{
-                                .writer = BufferedWriter{
-                                    .fd = this.bltn.stderr.expectFd(),
-                                    .remain = error_string,
-                                    .parent = BufferedWriter.ParentPtr.init(this),
-                                    .bytelist = this.bltn.stdBufferedBytelist(.stderr),
+                                .writer = switch (BufferedWriter.init(
+                                    this.bltn.stderr.expectFd(),
+                                    error_string,
+                                    BufferedWriter.ParentPtr.init(this),
+                                    this.bltn.stdBufferedBytelist(.stderr),
+                                )) {
+                                    .result => |bw| bw,
+                                    .err => |errrr| {
+                                        global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(errrr));
+                                        return;
+                                    },
                                 },
                                 .arr = std.ArrayList(u8).init(bun.default_allocator),
                             };
@@ -4920,11 +4945,17 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     if (this.bltn.stdout.needsIO()) {
                         queued = true;
                         const blocking_output: BlockingOutput = .{
-                            .writer = BufferedWriter{
-                                .fd = this.bltn.stdout.expectFd(),
-                                .remain = output.items[0..],
-                                .parent = BufferedWriter.ParentPtr.init(this),
-                                .bytelist = this.bltn.stdBufferedBytelist(.stdout),
+                            .writer = switch (BufferedWriter.init(
+                                this.bltn.stdout.expectFd(),
+                                output.items[0..],
+                                BufferedWriter.ParentPtr.init(this),
+                                this.bltn.stdBufferedBytelist(.stdout),
+                            )) {
+                                .result => |bw| bw,
+                                .err => |theerr| {
+                                    global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(theerr));
+                                    return;
+                                },
                             },
                             .arr = output,
                         };
@@ -5737,11 +5768,14 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     if (this.bltn.stderr.needsIO()) {
                         this.state = .{
                             .waiting_write_err = .{
-                                .writer = BufferedWriter{
-                                    .fd = this.bltn.stderr.expectFd(),
-                                    .remain = buf,
-                                    .parent = BufferedWriter.ParentPtr.init(this),
-                                    .bytelist = this.bltn.stdBufferedBytelist(.stderr),
+                                .writer = switch (BufferedWriter.init(
+                                    this.bltn.stderr.expectFd(),
+                                    buf,
+                                    BufferedWriter.ParentPtr.init(this),
+                                    this.bltn.stdBufferedBytelist(.stderr),
+                                )) {
+                                    .result => |bw| bw,
+                                    .err => |e| return .{ .err = e },
                                 },
                                 .exit_code = exit_code,
                             },
@@ -6217,11 +6251,14 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                             const error_string = Builtin.Kind.usageString(.rm);
                                             if (this.bltn.stderr.needsIO()) {
                                                 parse_opts.state = .{
-                                                    .wait_write_err = BufferedWriter{
-                                                        .fd = this.bltn.stderr.expectFd(),
-                                                        .remain = error_string,
-                                                        .parent = BufferedWriter.ParentPtr.init(this),
-                                                        .bytelist = this.bltn.stdBufferedBytelist(.stderr),
+                                                    .wait_write_err = switch (BufferedWriter.init(
+                                                        this.bltn.stderr.expectFd(),
+                                                        error_string,
+                                                        BufferedWriter.ParentPtr.init(this),
+                                                        this.bltn.stdBufferedBytelist(.stderr),
+                                                    )) {
+                                                        .result => |bw| bw,
+                                                        .err => |e| return .{ .err = e },
                                                     },
                                                 };
                                                 parse_opts.state.wait_write_err.writeIfPossible(false);
@@ -6255,11 +6292,14 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                                     const buf = "rm: \"-i\" is not supported yet";
                                                     if (this.bltn.stderr.needsIO()) {
                                                         parse_opts.state = .{
-                                                            .wait_write_err = BufferedWriter{
-                                                                .fd = this.bltn.stderr.expectFd(),
-                                                                .remain = buf,
-                                                                .parent = BufferedWriter.ParentPtr.init(this),
-                                                                .bytelist = this.bltn.stdBufferedBytelist(.stderr),
+                                                            .wait_write_err = switch (BufferedWriter.init(
+                                                                this.bltn.stderr.expectFd(),
+                                                                buf,
+                                                                BufferedWriter.ParentPtr.init(this),
+                                                                this.bltn.stdBufferedBytelist(.stderr),
+                                                            )) {
+                                                                .result => |fd| fd,
+                                                                .err => |e| return .{ .err = e },
                                                             },
                                                         };
                                                         parse_opts.state.wait_write_err.writeIfPossible(false);
@@ -6300,11 +6340,14 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                                             const error_string = this.bltn.fmtErrorArena(.rm, "\"{s}\" may not be removed\n", .{resolved_path});
                                                             if (this.bltn.stderr.needsIO()) {
                                                                 parse_opts.state = .{
-                                                                    .wait_write_err = BufferedWriter{
-                                                                        .fd = this.bltn.stderr.expectFd(),
-                                                                        .remain = error_string,
-                                                                        .parent = BufferedWriter.ParentPtr.init(this),
-                                                                        .bytelist = this.bltn.stdBufferedBytelist(.stderr),
+                                                                    .wait_write_err = switch (BufferedWriter.init(
+                                                                        this.bltn.stderr.expectFd(),
+                                                                        error_string,
+                                                                        BufferedWriter.ParentPtr.init(this),
+                                                                        this.bltn.stdBufferedBytelist(.stderr),
+                                                                    )) {
+                                                                        .result => |bw| bw,
+                                                                        .err => |e| return .{ .err = e },
                                                                     },
                                                                 };
                                                                 parse_opts.state.wait_write_err.writeIfPossible(false);
@@ -6339,11 +6382,14 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                                 const error_string = "rm: illegal option -- -\n";
                                                 if (this.bltn.stderr.needsIO()) {
                                                     parse_opts.state = .{
-                                                        .wait_write_err = BufferedWriter{
-                                                            .fd = this.bltn.stderr.expectFd(),
-                                                            .remain = error_string,
-                                                            .parent = BufferedWriter.ParentPtr.init(this),
-                                                            .bytelist = this.bltn.stdBufferedBytelist(.stderr),
+                                                        .wait_write_err = switch (BufferedWriter.init(
+                                                            this.bltn.stderr.expectFd(),
+                                                            error_string,
+                                                            BufferedWriter.ParentPtr.init(this),
+                                                            this.bltn.stdBufferedBytelist(.stderr),
+                                                        )) {
+                                                            .result => |bw| bw,
+                                                            .err => |e| return .{ .err = e },
                                                         },
                                                     };
                                                     parse_opts.state.wait_write_err.writeIfPossible(false);
@@ -6362,11 +6408,14 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                                 const error_string = this.bltn.fmtErrorArena(.rm, "illegal option -- {s}\n", .{flag[1..]});
                                                 if (this.bltn.stderr.needsIO()) {
                                                     parse_opts.state = .{
-                                                        .wait_write_err = BufferedWriter{
-                                                            .fd = this.bltn.stderr.expectFd(),
-                                                            .remain = error_string,
-                                                            .parent = BufferedWriter.ParentPtr.init(this),
-                                                            .bytelist = this.bltn.stdBufferedBytelist(.stderr),
+                                                        .wait_write_err = switch (BufferedWriter.init(
+                                                            this.bltn.stderr.expectFd(),
+                                                            error_string,
+                                                            BufferedWriter.ParentPtr.init(this),
+                                                            this.bltn.stdBufferedBytelist(.stderr),
+                                                        )) {
+                                                            .result => |bw| bw,
+                                                            .err => |e| return .{ .err = e },
                                                         },
                                                     };
                                                     parse_opts.state.wait_write_err.writeIfPossible(false);
@@ -6587,11 +6636,17 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                     }
                                 } else {
                                     const bo = BlockingOutput{
-                                        .writer = BufferedWriter{
-                                            .fd = this.bltn.stderr.expectFd(),
-                                            .remain = error_string,
-                                            .parent = BufferedWriter.ParentPtr.init(this),
-                                            .bytelist = this.bltn.stdBufferedBytelist(.stderr),
+                                        .writer = switch (BufferedWriter.init(
+                                            this.bltn.stderr.expectFd(),
+                                            error_string,
+                                            BufferedWriter.ParentPtr.init(this),
+                                            this.bltn.stdBufferedBytelist(.stderr),
+                                        )) {
+                                            .result => |bw| bw,
+                                            .err => |e| {
+                                                global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(e));
+                                                return;
+                                            },
                                         },
                                         .arr = std.ArrayList(u8).init(bun.default_allocator),
                                     };
@@ -6628,7 +6683,14 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         }
                         return;
                     }
-                    this.queueBlockingOutput(verbose.toBlockingOutput());
+                    const bo = switch (verbose.toBlockingOutput()) {
+                        .result => |bo| bo,
+                        .err => |e| {
+                            global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(e));
+                            return;
+                        },
+                    };
+                    this.queueBlockingOutput(bo);
                 }
 
                 fn queueBlockingOutput(this: *Rm, bo: BlockingOutput) void {
@@ -6695,18 +6757,21 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                         const EntryKindHint = enum { idk, dir, file };
 
-                        pub fn toBlockingOutput(this: *DirTask) BlockingOutput {
+                        pub fn toBlockingOutput(this: *DirTask) Maybe(BlockingOutput) {
                             const arr = this.takeDeletedEntries();
                             const bo = BlockingOutput{
                                 .arr = arr,
-                                .writer = BufferedWriter{
-                                    .fd = bun.STDOUT_FD,
-                                    .remain = arr.items[0..],
-                                    .parent = BufferedWriter.ParentPtr.init(this.task_manager.rm),
-                                    .bytelist = this.task_manager.rm.bltn.stdBufferedBytelist(.stdout),
+                                .writer = switch (BufferedWriter.init(
+                                    bun.STDOUT_FD,
+                                    arr.items[0..],
+                                    BufferedWriter.ParentPtr.init(this.task_manager.rm),
+                                    this.task_manager.rm.bltn.stdBufferedBytelist(.stdout),
+                                )) {
+                                    .result => |bw| bw,
+                                    .err => |e| return .{ .err = e },
                                 },
                             };
-                            return bo;
+                            return .{ .result = bo };
                         }
 
                         pub fn takeDeletedEntries(this: *DirTask) std.ArrayList(u8) {
@@ -7307,7 +7372,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             }
         };
 
-        const BufferedWriter = if (bun.Environment.isWindows) BufferedPipeWriter else BufferedFdWriter;
+        pub const BufferedWriter = if (bun.Environment.isWindows) BufferedPipeWriter else BufferedFdWriter;
 
         pub const BufferedPipeWriter = struct {
             remain: []const u8 = "",
@@ -7468,7 +7533,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     .bytelist = bytelist,
                 };
 
-                return .{ .success = this };
+                return .{ .result = this };
             }
 
             pub fn onReady(this: *BufferedFdWriter, _: i64) void {
