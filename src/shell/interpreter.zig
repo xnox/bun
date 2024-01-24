@@ -52,6 +52,11 @@ const ast = shell.AST;
 
 const GlobWalker = @import("../glob.zig").GlobWalker_(null, true);
 
+/// Using these instead of `bun.STD{IN,OUT,ERR}_FD` to makesure we use uv fd
+const STDIN_FD: bun.FileDescriptor = if (bun.Environment.isWindows) bun.FDImpl.fromUV(0).encode() else bun.STDIN_FD;
+const STDOUT_FD: bun.FileDescriptor = if (bun.Environment.isWindows) bun.FDImpl.fromUV(1).encode() else bun.STDOUT_FD;
+const STDERR_FD: bun.FileDescriptor = if (bun.Environment.isWindows) bun.FDImpl.fromUV(2).encode() else bun.STDERR_FD;
+
 pub const SUBSHELL_TODO_ERROR = "Subshells are not implemented, please open GitHub issue.";
 const stdin_no = 0;
 const stdout_no = 1;
@@ -794,7 +799,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                 switch (io.*) {
                     .std => |val| {
-                        const fd = if (iotype == .stdout) bun.STDOUT_FD else bun.STDERR_FD;
+                        const fd = if (iotype == .stdout) STDOUT_FD else STDERR_FD;
                         const bw = switch (BufferedWriter.init(fd, buf, BufferedWriter.ParentPtr.init(ctx), val.captured)) {
                             .result => |bw| bw,
                             .err => |e| {
@@ -806,7 +811,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         return .yield;
                     },
                     .fd => {
-                        const fd = if (iotype == .stdout) bun.STDOUT_FD else bun.STDERR_FD;
+                        const fd = if (iotype == .stdout) STDOUT_FD else STDERR_FD;
                         const bw = switch (BufferedWriter.init(fd, buf, BufferedWriter.ParentPtr.init(ctx), null)) {
                             .result => |bw| bw,
                             .err => |e| {
@@ -3641,7 +3646,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 pub fn asFd(this: *BuiltinIO) ?bun.FileDescriptor {
                     return switch (this.*) {
                         .fd => this.fd,
-                        .captured => if (this.captured.out_kind == .stdout) bun.STDOUT_FD else bun.STDERR_FD,
+                        .captured => if (this.captured.out_kind == .stdout) STDOUT_FD else STDERR_FD,
                         else => null,
                     };
                 }
@@ -3649,7 +3654,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 pub fn expectFd(this: *BuiltinIO) bun.FileDescriptor {
                     return switch (this.*) {
                         .fd => this.fd,
-                        .captured => if (this.captured.out_kind == .stdout) bun.STDOUT_FD else bun.STDERR_FD,
+                        .captured => if (this.captured.out_kind == .stdout) STDOUT_FD else STDERR_FD,
                         else => @panic("No fd"),
                     };
                 }
@@ -3673,7 +3678,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             this.buf.deinit();
                         },
                         .fd => {
-                            if (this.fd != bun.invalid_fd and this.fd != bun.STDIN_FD) {
+                            if (this.fd != bun.invalid_fd and this.fd != STDIN_FD) {
                                 _ = Syscall.close(this.fd);
                                 this.fd = bun.invalid_fd;
                             }
@@ -3766,19 +3771,19 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 const io = io_.*;
 
                 const stdin: Builtin.BuiltinIO = switch (io.stdin) {
-                    .std => .{ .fd = bun.STDIN_FD },
+                    .std => .{ .fd = STDIN_FD },
                     .fd => |fd| .{ .fd = fd },
                     .pipe => .{ .buf = std.ArrayList(u8).init(interpreter.allocator) },
                     .ignore => .ignore,
                 };
                 const stdout: Builtin.BuiltinIO = switch (io.stdout) {
-                    .std => if (io.stdout.std.captured) |bytelist| .{ .captured = .{ .out_kind = .stdout, .bytelist = bytelist } } else .{ .fd = bun.STDOUT_FD },
+                    .std => if (io.stdout.std.captured) |bytelist| .{ .captured = .{ .out_kind = .stdout, .bytelist = bytelist } } else .{ .fd = STDOUT_FD },
                     .fd => |fd| .{ .fd = fd },
                     .pipe => .{ .buf = std.ArrayList(u8).init(interpreter.allocator) },
                     .ignore => .ignore,
                 };
                 const stderr: Builtin.BuiltinIO = switch (io.stderr) {
-                    .std => if (io.stderr.std.captured) |bytelist| .{ .captured = .{ .out_kind = .stderr, .bytelist = bytelist } } else .{ .fd = bun.STDERR_FD },
+                    .std => if (io.stderr.std.captured) |bytelist| .{ .captured = .{ .out_kind = .stderr, .bytelist = bytelist } } else .{ .fd = STDERR_FD },
                     .fd => |fd| .{ .fd = fd },
                     .pipe => .{ .buf = std.ArrayList(u8).init(interpreter.allocator) },
                     .ignore => .ignore,
@@ -6782,7 +6787,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             const bo = BlockingOutput{
                                 .arr = arr,
                                 .writer = switch (BufferedWriter.init(
-                                    bun.STDOUT_FD,
+                                    STDOUT_FD,
                                     arr.items[0..],
                                     BufferedWriter.ParentPtr.init(this.task_manager.rm),
                                     this.task_manager.rm.bltn.stdBufferedBytelist(.stdout),
@@ -7396,10 +7401,9 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
         pub const BufferedPipeWriter = struct {
             remain: []const u8 = "",
+            fd: bun.FileDescriptor = bun.invalid_fd,
             input_buffer: uv.uv_buf_t = std.mem.zeroes(uv.uv_buf_t),
-            write_req: uv.uv_write_t = std.mem.zeroes(uv.uv_write_t),
-            uvfd: bun.FileDescriptor,
-            pipe: ?uv.uv_pipe_t,
+            write_req: uv.fs_t = std.mem.zeroes(uv.fs_t),
             poll_ref: ?*bun.Async.FilePoll = null,
             written: usize = 0,
 
@@ -7413,100 +7417,59 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     .remain = remain,
                     .parent = parent,
                     .bytelist = bytelist,
-                    .pipe = std.mem.zeroes(uv.uv_pipe_t),
-                    .uvfd = bun.invalid_fd,
                 };
+
+                if (bun.Environment.allow_assert) {
+                    const kind = bun.FDImpl.decode(fd).kind;
+                    std.debug.assert(kind == .uv);
+                }
 
                 // const dupedfd = switch (Syscall.dup(fd)) {
                 //     .result => |dup| dup,
                 //     .err => |e| return .{ .err = e.withFd(fd) },
                 // };
 
-                var pipe = std.mem.zeroes(uv.uv_pipe_t);
                 // const uvfd = bun.uvfdcast(fd);
-                // const uvfd = bun.uvfdcast(fd);
-                // const uvfd = bun.toLibUVOwnedFD(dupedfd);
+                // const uvfd = bun.toLibUVOwnedFD(fd);
 
-                if (uv.uv_pipe_init(uv.Loop.get(), &pipe, 0) != 0) {
-                    // This shouldn't actually happen, checked the libuv source and it always returns 0
-                    @panic("Failed to create pipe");
-                }
-
-                if (uv.uv_pipe_open(&pipe, bun.uvfdcast(fd)).errEnum()) |e| {
-                    return .{ .err = Syscall.Error.fromCode(e, .uv_pipe).withFd(fd) };
-                }
-
-                this.pipe = pipe;
-                this.uvfd = fd;
+                this.fd = fd;
 
                 return .{ .result = this };
             }
 
-            pub fn writeIfPossible(this: *BufferedPipeWriter, comptime is_sync: bool) void {
-                this.writeAllowBlocking(is_sync);
-            }
-
-            pub fn uvWriteCallback(req: *uv.uv_write_t, status: uv.ReturnCode) callconv(.C) void {
+            pub fn uvFsCallback(req: *uv.fs_t) callconv(.C) void {
                 const this = bun.cast(*BufferedPipeWriter, req.data);
-                if (this.pipe == null) return;
-                if (status.errEnum()) |e| {
-                    log("uv_write({d}) fail: {d}", .{ this.remain.len, status.int() });
+                defer uv.uv_fs_req_cleanup(&this.write_req);
+                if (req.result.errEnum()) |e| {
+                    log("uv_fs_write({d}) fail: {s}", .{ this.remain.len, @tagName(e) });
                     this.err = Syscall.Error.fromCode(e, .write);
                     this.deinit();
                     return;
                 }
 
+                log("uv_fs_write({d})", .{this.remain.len});
                 if (this.bytelist) |blist| {
                     blist.append(bun.default_allocator, this.remain[0..]) catch bun.outOfMemory();
                 }
                 this.written += this.remain.len;
                 this.remain = "";
                 // we are done!
-                this.close();
+                this.deinit();
+            }
+
+            pub fn writeIfPossible(this: *BufferedPipeWriter, comptime is_sync: bool) void {
+                this.writeAllowBlocking(is_sync);
             }
 
             pub fn writeAllowBlocking(this: *BufferedPipeWriter, allow_blocking: bool) void {
-                const pipe = &(this.pipe orelse return);
+                _ = allow_blocking; // autofix
 
-                var to_write = this.remain;
-
-                this.input_buffer = uv.uv_buf_t.init(to_write);
-                if (allow_blocking) {
-                    while (true) {
-                        if (to_write.len == 0) {
-                            // we are done!
-                            this.close();
-                            return;
-                        }
-                        const status = uv.uv_try_write(@ptrCast(pipe), @ptrCast(&this.input_buffer), 1);
-                        if (status.errEnum()) |err| {
-                            if (err == bun.C.E.AGAIN) {
-                                //EAGAIN
-                                this.write_req.data = this;
-                                const write_err = uv.uv_write(&this.write_req, @ptrCast(pipe), @ptrCast(&this.input_buffer), 1, BufferedPipeWriter.uvWriteCallback).int();
-                                if (write_err < 0) {
-                                    log("uv_write({d}) fail: {d}", .{ this.remain.len, write_err });
-                                    this.deinit();
-                                }
-                                return;
-                            }
-                            // fail
-                            log("uv_try_write({d}) fail: {d}", .{ to_write.len, status.int() });
-                            this.deinit();
-                            return;
-                        }
-                        const bytes_written: usize = @intCast(status.int());
-                        this.written += bytes_written;
-                        this.remain = this.remain[@min(bytes_written, this.remain.len)..];
-                        to_write = to_write[bytes_written..];
-                    }
-                } else {
-                    this.write_req.data = this;
-                    const err = uv.uv_write(&this.write_req, @ptrCast(pipe), @ptrCast(&this.input_buffer), 1, BufferedPipeWriter.uvWriteCallback).int();
-                    if (err < 0) {
-                        log("uv_write({d}) fail: {d}", .{ this.remain.len, err });
-                        this.deinit();
-                    }
+                this.write_req.data = @ptrCast(this);
+                this.input_buffer = uv.uv_buf_t.init(this.remain);
+                const ret = uv.uv_fs_write(uv.Loop.get(), &this.write_req, bun.uvfdcast(this.fd), @ptrCast(&this.input_buffer), 1, 0, uvFsCallback);
+                if (ret.errEnum()) |e| {
+                    this.err = Syscall.Error.fromCode(e, .write);
+                    this.deinit();
                 }
             }
 
@@ -7520,16 +7483,11 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     poll.deinit();
                 }
 
-                if (this.pipe) |*pipe| {
-                    _ = uv.uv_close(@ptrCast(pipe), null);
-                    this.pipe = null;
-                }
-
-                if (this.uvfd != bun.invalid_fd) {
-                    if (bun.FDImpl.decode(this.uvfd).close()) |e| {
-                        bun.Output.debugWarn("closing uvfd failed: {anytype}", .{e});
-                    }
-                }
+                // if (this.fd != bun.invalid_fd) {
+                //     if (bun.FDImpl.decode(this.fd).close()) |e| {
+                //         bun.Output.debugWarn("closing uvfd failed: {anytype}", .{e});
+                //     }
+                // }
             }
 
             pub fn deinit(this: *BufferedPipeWriter) void {
