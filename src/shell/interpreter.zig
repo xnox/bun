@@ -52,6 +52,11 @@ const ast = shell.AST;
 
 const GlobWalker = @import("../glob.zig").GlobWalker_(null, true);
 
+// const Shellfd = if (bun.Environment.isWindows) union(enum) {
+//     fd: bun.FileDescriptor,
+//     pipe:
+// } else bun.FileDescriptor;
+
 /// Using these instead of `bun.STD{IN,OUT,ERR}_FD` to makesure we use uv fd
 const STDIN_FD: bun.FileDescriptor = if (bun.Environment.isWindows) bun.FDImpl.fromUV(0).encode() else bun.STDIN_FD;
 const STDOUT_FD: bun.FileDescriptor = if (bun.Environment.isWindows) bun.FDImpl.fromUV(1).encode() else bun.STDOUT_FD;
@@ -713,7 +718,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     break :brk cwd_str;
                 };
 
-                const new_cwd_fd = switch (Syscall.openat(
+                const new_cwd_fd = switch (openat(
                     this.cwd_fd,
                     new_cwd,
                     std.os.O.DIRECTORY | std.os.O.RDONLY,
@@ -1005,7 +1010,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             // export_env.put("PWD", cwd) catch bun.outOfMemory();
             // export_env.put("OLDPWD", "/") catch bun.outOfMemory();
 
-            const cwd_fd = switch (Syscall.open(cwd, std.os.O.DIRECTORY | std.os.O.RDONLY, 0)) {
+            const cwd_fd = switch (open(cwd, std.os.O.DIRECTORY | std.os.O.RDONLY, 0)) {
                 .result => |fd| fd,
                 .err => |err| {
                     return .{ .err = .{ .sys = err.toSystemError() } };
@@ -2784,10 +2789,19 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
             fn initializePipes(pipes: []Pipe, set_count: *u32) Maybe(void) {
                 for (pipes) |*pipe| {
-                    pipe.* = switch (Syscall.pipe()) {
-                        .err => |e| return .{ .err = e },
-                        .result => |p| p,
-                    };
+                    if (bun.Environment.isWindows) {
+                        var fds: [2]uv.uv_file = undefined;
+                        if (uv.uv_pipe(&fds, uv.UV_NONBLOCK_PIPE, uv.UV_NONBLOCK_PIPE).errEnum()) |e| {
+                            return .{ .err = Syscall.Error.fromCode(e, .pipe) };
+                        }
+                        pipe[0] = bun.FDImpl.fromUV(fds[0]).encode();
+                        pipe[1] = bun.FDImpl.fromUV(fds[1]).encode();
+                    } else {
+                        pipe.* = switch (Syscall.pipe()) {
+                            .err => |e| return .{ .err = e },
+                            .result => |p| p,
+                        };
+                    }
                     set_count.* += 1;
                 }
                 return Maybe(void).success;
@@ -3349,7 +3363,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             // const perm = 0o666;
                             const perm = 0o664;
                             const extra: bun.Mode = if (this.node.redirect.append) O.APPEND else O.TRUNC;
-                            const redirfd = switch (Syscall.openat(this.base.shell.cwd_fd, path, O.WRONLY | O.CREAT | extra | O.NONBLOCK, perm)) {
+                            const redirfd = switch (openat(this.base.shell.cwd_fd, path, O.WRONLY | O.CREAT | extra | O.NONBLOCK, perm)) {
                                 .err => |e| {
                                     const buf = std.fmt.allocPrint(this.spawn_arena.allocator(), "bun: {s}: {s}", .{ e.toSystemError().message, path }) catch bun.outOfMemory();
                                     _ = this.writeFailingError(buf, 1);
@@ -3889,8 +3903,9 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             // const perm = 0o666;
                             const perm = 0o664;
                             const extra: bun.Mode = if (node.redirect.append) O.APPEND else O.TRUNC;
-                            const redirfd = switch (openat(cmd.base.shell.cwd_fd, path, O.WRONLY | O.CREAT | extra | O.NONBLOCK, perm)) {
-                                // const redirfd = switch (openat(cmd.base.shell.cwd_fd, path, std.os.O.WRONLY | std.os.O.CREAT | std.os.O.NONBLOCK, perm)) {
+                            _ = extra; // autofix
+                            // const redirfd = switch (openat(cmd.base.shell.cwd_fd, path, O.WRONLY | O.CREAT | extra | O.NONBLOCK, perm)) {
+                            const redirfd = switch (openat(cmd.base.shell.cwd_fd, path, std.os.O.WRONLY | std.os.O.CREAT | std.os.O.NONBLOCK, perm)) {
                                 .err => |e| {
                                     const buf = std.fmt.allocPrint(arena.allocator(), "bun: {s}: {s}", .{ e.toSystemError().message, path }) catch bun.outOfMemory();
                                     cmd.writeFailingError(buf, 1);
@@ -5078,7 +5093,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     }
 
                     pub fn run(this: *@This()) void {
-                        const fd = switch (Syscall.openat(this.cwd, this.path, os.O.RDONLY | os.O.DIRECTORY, 0)) {
+                        const fd = switch (openat(this.cwd, this.path, os.O.RDONLY | os.O.DIRECTORY, 0)) {
                             .err => |e| {
                                 switch (e.getErrno()) {
                                     bun.C.E.NOENT => {
@@ -5656,7 +5671,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     task: shell.eval.ShellTask(@This(), EventLoopKind, runFromThreadPool, runFromMainThread, print),
 
                     pub fn runFromThreadPool(this: *@This()) void {
-                        const fd = switch (Syscall.openat(this.cwd, this.target, os.O.RDONLY | os.O.DIRECTORY, 0)) {
+                        const fd = switch (openat(this.cwd, this.target, os.O.RDONLY | os.O.DIRECTORY, 0)) {
                             .err => |e| {
                                 switch (e.getErrno()) {
                                     bun.C.E.NOTDIR => {
@@ -7046,7 +7061,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         }
 
                         const flags = os.O.DIRECTORY | os.O.RDONLY;
-                        const fd = switch (Syscall.openat(dirfd, path, flags, 0)) {
+                        const fd = switch (openat(dirfd, path, flags, 0)) {
                             .result => |fd| fd,
                             .err => |e| {
                                 switch (e.getErrno()) {
@@ -7149,7 +7164,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         var treat_as_dir = true;
                         const fd: bun.FileDescriptor = handle_entry: while (true) {
                             if (treat_as_dir) {
-                                switch (Syscall.openat(dirfd, dir_task.path, os.O.DIRECTORY | os.O.RDONLY, 0)) {
+                                switch (openat(dirfd, dir_task.path, os.O.DIRECTORY | os.O.RDONLY, 0)) {
                                     .err => |e| switch (e.getErrno()) {
                                         bun.C.E.NOENT => {
                                             if (this.opts.force) {
@@ -8101,19 +8116,25 @@ inline fn fastMod(val: anytype, comptime rhs: comptime_int) @TypeOf(val) {
 }
 
 fn openat(dir: bun.FileDescriptor, path: [:0]const u8, flags: bun.Mode, perm: bun.Mode) Maybe(bun.FileDescriptor) {
-    var out_buffer: [bun.MAX_PATH_BYTES]u8 = undefined;
-    const dirpath = switch (Syscall.getFdPath(dir, &out_buffer)) {
-        .result => |dirpath| dirpath,
+    const fd = switch (Syscall.openat(dir, path, flags, perm)) {
+        .result => |fd| fd,
         .err => |e| return .{ .err = e },
     };
-    const parts: []const []const u8 = &[_][]const u8{
-        dirpath,
-        path[0..],
-    };
-    const joined = ResolvePath.joinZ(parts, .windows);
+    if (bun.Environment.isWindows) {
+        return .{ .result = bun.toLibUVOwnedFD(fd) };
+    }
+    return fd;
+}
 
-    return bun.sys.open(joined, flags, perm);
-    // const joined_path = bun.strings.toWPath(&wide_buf, joined);
+pub fn open(file_path: [:0]const u8, flags: bun.Mode, perm: bun.Mode) Maybe(bun.FileDescriptor) {
+    const fd = switch (Syscall.open(file_path, flags, perm)) {
+        .result => |fd| fd,
+        .err => |e| return .{ .err = e },
+    };
+    if (bun.Environment.isWindows) {
+        return .{ .result = bun.toLibUVOwnedFD(fd) };
+    }
+    return fd;
 }
 
 // fn openat(dir: bun.FileDescriptor, path: [:0]const u8, flags: bun.Mode, perm: bun.Mode) Maybe(bun.FileDescriptor) {
