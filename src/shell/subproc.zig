@@ -221,7 +221,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                         var buffered_input: BufferedPipeInput = .{ .pipe = pipe, .source = undefined };
                         switch (stdio) {
                             .array_buffer => |array_buffer| {
-                                buffered_input.source = .{ .array_buffer = array_buffer };
+                                buffered_input.source = .{ .array_buffer = array_buffer.buf };
                             },
                             .blob => |blob| {
                                 buffered_input.source = .{ .blob = blob };
@@ -230,9 +230,9 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                         }
                         return Writable{ .buffered_input = buffered_input };
                     },
-                    .memfd => {
-                        return Writable{ .memfd = stdio.memfd };
-                    },
+                    // .memfd => {
+                    //     return Writable{ .memfd = stdio.memfd };
+                    // },
                     .fd => |fd| {
                         return Writable{ .fd = fd };
                     },
@@ -1608,9 +1608,10 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
             out: **@This(),
         ) bun.shell.Result(void) {
             const globalThis = GlobalHandle.init(globalThis_);
-            if (comptime Environment.isWindows) {
-                return .{ .err = globalThis.throwTODO("spawn() is not yet implemented on Windows") };
-            }
+            _ = globalThis; // autofix
+            // if (comptime Environment.isWindows) {
+            //     return .{ .err = globalThis.throwTODO("spawn() is not yet implemented on Windows") };
+            // }
             var arena = @import("root").bun.ArenaAllocator.init(bun.default_allocator);
             defer arena.deinit();
 
@@ -1738,7 +1739,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
 
         fn uvExitCallback(process: *uv.uv_process_t, exit_status: i64, term_signal: c_int) callconv(.C) void {
             const subprocess: *Subprocess = @alignCast(@ptrCast(process.data.?));
-            if (@hasDecl(@TypeOf(subprocess.globalThis), "assertOnJSTHread")) {
+            if (EventLoopKind == .js) {
                 subprocess.globalThis.assertOnJSThread();
             }
             subprocess.exit_code = @as(u8, @truncate(@as(u64, @intCast(exit_status))));
@@ -1765,10 +1766,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
 
             // WINDOWS:
             if (Environment.isWindows) {
-                spawn_args.argv.append(allocator, null) catch {
-                    globalThis.throwOutOfMemory();
-                    return .zero;
-                };
+                spawn_args.argv.append(allocator, null) catch bun.outOfMemory();
 
                 if (!spawn_args.override_env and spawn_args.env_array.items.len == 0) {
                     // spawn_args.env_array.items = jsc_vm.bundler.env.map.createNullDelimitedEnvMap(allocator) catch |err| return globalThis.handleError(err, "in posix_spawn");
@@ -1776,31 +1774,25 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                     spawn_args.env_array.capacity = spawn_args.env_array.items.len;
                 }
 
-                spawn_args.env_array.append(allocator, null) catch {
-                    globalThis.throwOutOfMemory();
-                    return .zero;
-                };
+                spawn_args.env_array.append(allocator, null) catch bun.outOfMemory();
                 env = @ptrCast(spawn_args.env_array.items.ptr);
 
                 const alloc = globalThis.allocator();
-                var subprocess = alloc.create(Subprocess) catch {
-                    globalThis.throwOutOfMemory();
-                    return .zero;
-                };
+                var subprocess = alloc.create(Subprocess) catch bun.outOfMemory();
 
                 // spawn_args.stdio
                 var uv_stdio = [3]uv.uv_stdio_container_s{
                     spawn_args.stdio[0].setUpChildIoUvSpawn(0, &subprocess.pipes[0], true, bun.invalid_fd) catch |err| {
                         alloc.destroy(subprocess);
-                        return globalThis.handleError(err, "in setting up uv_process stdin");
+                        return .{ .err = globalThis.handleError(err, "in setting up uv_process stdin") };
                     },
                     spawn_args.stdio[1].setUpChildIoUvSpawn(1, &subprocess.pipes[1], false, bun.invalid_fd) catch |err| {
                         alloc.destroy(subprocess);
-                        return globalThis.handleError(err, "in setting up uv_process stdout");
+                        return .{ .err = globalThis.handleError(err, "in setting up uv_process stdout") };
                     },
                     spawn_args.stdio[2].setUpChildIoUvSpawn(2, &subprocess.pipes[2], false, bun.invalid_fd) catch |err| {
                         alloc.destroy(subprocess);
-                        return globalThis.handleError(err, "in setting up uv_process stderr");
+                        return .{ .err = globalThis.handleError(err, "in setting up uv_process stderr") };
                     },
                 };
 
@@ -1811,7 +1803,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                     .args = @ptrCast(spawn_args.argv.items[0 .. spawn_args.argv.items.len - 1 :null]),
                     .cwd = cwd_resolver.resolveCWDZ(spawn_args.cwd) catch |err| {
                         alloc.destroy(subprocess);
-                        return globalThis.handleError(err, "in uv_spawn");
+                        return .{ .err = globalThis.handleError(err, "in uv_spawn") };
                     },
                     .env = env,
                     .file = spawn_args.argv.items[0].?,
@@ -1826,23 +1818,19 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
 
                 if (uv.uv_spawn(globalThis.platformEventLoop(), &subprocess.pid, &options).errEnum()) |errno| {
                     alloc.destroy(subprocess);
-                    globalThis.throwValue(bun.sys.Error.fromCode(errno, .uv_spawn).toJSC(globalThis));
-                    return .zero;
+                    return .{ .err = bun.shell.ShellErr.newSys(bun.sys.Error.fromCode(errno, .uv_spawn)) };
                 }
 
                 // When run synchronously, subprocess isn't garbage collected
                 subprocess.* = Subprocess{
                     .pipes = subprocess.pipes,
-                    .globalThis = globalThis,
+                    .globalThis = globalThis_,
                     .pid = subprocess.pid,
                     .pidfd = 0,
-                    .stdin = Writable.initWithPipe(spawn_args.stdio[0], &subprocess.pipes[0], globalThis) catch {
-                        globalThis.throwOutOfMemory();
-                        return .zero;
-                    },
+                    .stdin = Writable.initWithPipe(spawn_args.stdio[0], &subprocess.pipes[0], globalThis_) catch bun.outOfMemory(),
                     // stdout and stderr only uses allocator and default_max_buffer_size if they are pipes and not a array buffer
-                    .stdout = Readable.initWithPipe(spawn_args.stdio[1], &subprocess.pipes[1], globalThis.allocator(), default_max_buffer_size),
-                    .stderr = Readable.initWithPipe(spawn_args.stdio[2], &subprocess.pipes[2], globalThis.allocator(), default_max_buffer_size),
+                    .stdout = Readable.init(subprocess, .stdout, spawn_args.stdio[1], &subprocess.pipes[1], globalThis.allocator(), default_max_buffer_size),
+                    .stderr = Readable.init(subprocess, .stderr, spawn_args.stdio[2], &subprocess.pipes[2], globalThis.allocator(), default_max_buffer_size),
                     // .on_exit_callback = if (on_exit_callback != .zero) JSC.Strong.create(on_exit_callback, globalThis) else .{},
 
                     // .ipc_mode = ipc_mode,
@@ -1856,8 +1844,8 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                 subprocess.pid.data = subprocess;
                 // std.debug.assert(ipc_mode == .none); //TODO:
 
-                const out = if (comptime !is_sync) subprocess.toJS(globalThis) else .zero;
-                subprocess.this_jsvalue = out;
+                // const out = if (comptime !is_sync) subprocess.toJS(globalThis) else .zero;
+                // subprocess.this_jsvalue = out;
 
                 if (subprocess.stdin == .buffered_input) {
                     subprocess.stdin.buffered_input.remain = switch (subprocess.stdin.buffered_input.source) {
