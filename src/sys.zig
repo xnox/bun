@@ -1264,7 +1264,7 @@ pub fn getFdPath(fd: bun.FileDescriptor, out_buffer: *[MAX_PATH_BYTES]u8) Maybe(
     switch (comptime builtin.os.tag) {
         .windows => {
             var wide_buf: [windows.PATH_MAX_WIDE]u16 = undefined;
-            const wide_slice = std.os.windows.GetFinalPathNameByHandle(bun.fdcast(fd), .{}, wide_buf[0..]) catch {
+            const wide_slice = std.os.windows.GetFinalPathNameByHandle(fd.cast(), .{}, wide_buf[0..]) catch {
                 return Maybe([]u8){ .err = .{ .errno = @intFromEnum(bun.C.SystemErrno.EBADF), .syscall = .GetFinalPathNameByHandle } };
             };
 
@@ -1753,11 +1753,14 @@ pub fn dup(fd: bun.FileDescriptor) Maybe(bun.FileDescriptor) {
     if (comptime Environment.isWindows) {
         const target: *windows.HANDLE = undefined;
         const process = kernel32.GetCurrentProcess();
+        const PROCESS_DUP_HANDLE = 0x0040;
+        _ = PROCESS_DUP_HANDLE; // autofix
         const out = kernel32.DuplicateHandle(
             process,
             fd.cast(),
             process,
             target,
+            // PROCESS_DUP_HANDLE,
             0,
             w.TRUE,
             w.DUPLICATE_SAME_ACCESS,

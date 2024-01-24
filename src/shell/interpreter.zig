@@ -57,6 +57,14 @@ const stdin_no = 0;
 const stdout_no = 1;
 const stderr_no = 2;
 
+pub const O = if (bun.Environment.isWindows) struct {
+    pub const CREAT = uv.UV_FS_O_CREAT;
+    pub const WRONLY = uv.UV_FS_O_WRONLY;
+    pub const NONBLOCK = uv.UV_FS_O_NONBLOCK;
+    pub const TRUNC = uv.UV_FS_O_TRUNC;
+    pub const APPEND = uv.UV_FS_O_APPEND;
+} else std.os.O;
+
 pub fn OOM(e: anyerror) noreturn {
     if (comptime bun.Environment.allow_assert) {
         if (e != error.OutOfMemory) @panic("Ruh roh");
@@ -3333,9 +3341,10 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             }
                             const path = this.redirection_file.items[0..this.redirection_file.items.len -| 1 :0];
                             log("EXPANDED REDIRECT: {s}\n", .{this.redirection_file.items[0..]});
-                            const perm = 0o666;
-                            const extra: bun.Mode = if (this.node.redirect.append) std.os.O.APPEND else std.os.O.TRUNC;
-                            const redirfd = switch (Syscall.openat(this.base.shell.cwd_fd, path, std.os.O.WRONLY | std.os.O.CREAT | extra, perm)) {
+                            // const perm = 0o666;
+                            const perm = 0o664;
+                            const extra: bun.Mode = if (this.node.redirect.append) O.APPEND else O.TRUNC;
+                            const redirfd = switch (Syscall.openat(this.base.shell.cwd_fd, path, O.WRONLY | O.CREAT | extra | O.NONBLOCK, perm)) {
                                 .err => |e| {
                                     const buf = std.fmt.allocPrint(this.spawn_arena.allocator(), "bun: {s}: {s}", .{ e.toSystemError().message, path }) catch bun.outOfMemory();
                                     _ = this.writeFailingError(buf, 1);
@@ -3343,6 +3352,11 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                 },
                                 .result => |f| f,
                             };
+                            // const redirfd = switch (openat(this.base.shell.cwd_fd, path, std.os.O.WRONLY | std.os.O.CREAT | std.os.O.NONBLOCK, perm)) {
+                            //     .err => |@panic("GODDAMN"),
+                            //     .result => |f| f,
+                            // };
+
                             this.redirection_fd = redirfd;
                             setStdioFromRedirect(&spawn_args.stdio, this.node.redirect, .{ .fd = redirfd });
                         },
@@ -3867,9 +3881,11 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             }
                             const path = cmd.redirection_file.items[0..cmd.redirection_file.items.len -| 1 :0];
                             log("EXPANDED REDIRECT: {s}\n", .{cmd.redirection_file.items[0..]});
-                            const perm = 0o666;
-                            const extra: bun.Mode = if (node.redirect.append) std.os.O.APPEND else std.os.O.TRUNC;
-                            const redirfd = switch (Syscall.openat(cmd.base.shell.cwd_fd, path, std.os.O.WRONLY | std.os.O.CREAT | extra, perm)) {
+                            // const perm = 0o666;
+                            const perm = 0o664;
+                            const extra: bun.Mode = if (node.redirect.append) O.APPEND else O.TRUNC;
+                            const redirfd = switch (openat(cmd.base.shell.cwd_fd, path, O.WRONLY | O.CREAT | extra | O.NONBLOCK, perm)) {
+                                // const redirfd = switch (openat(cmd.base.shell.cwd_fd, path, std.os.O.WRONLY | std.os.O.CREAT | std.os.O.NONBLOCK, perm)) {
                                 .err => |e| {
                                     const buf = std.fmt.allocPrint(arena.allocator(), "bun: {s}: {s}", .{ e.toSystemError().message, path }) catch bun.outOfMemory();
                                     cmd.writeFailingError(buf, 1);
@@ -3877,6 +3893,10 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                 },
                                 .result => |f| f,
                             };
+                            // const redirfd = switch (openat(cmd.base.shell.cwd_fd, path, std.os.O.WRONLY | std.os.O.CREAT | std.os.O.NONBLOCK, perm)) {
+                            //     .err => @panic("GODDAMN"),
+                            //     .result => |f| f,
+                            // };
                             // cmd.redirection_fd = redirfd;
                             if (node.redirect.stdin) {
                                 cmd.exec.bltn.stdin = .{ .fd = redirfd };
@@ -7397,23 +7417,27 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     .uvfd = bun.invalid_fd,
                 };
 
-                const dupedfd = switch (Syscall.dup(fd)) {
-                    .result => |dup| dup,
-                    .err => |e| return .{ .err = e.withFd(fd) },
-                };
+                // const dupedfd = switch (Syscall.dup(fd)) {
+                //     .result => |dup| dup,
+                //     .err => |e| return .{ .err = e.withFd(fd) },
+                // };
 
-                const uvfd = bun.toLibUVOwnedFD(dupedfd);
+                var pipe = std.mem.zeroes(uv.uv_pipe_t);
+                // const uvfd = bun.uvfdcast(fd);
+                // const uvfd = bun.uvfdcast(fd);
+                // const uvfd = bun.toLibUVOwnedFD(dupedfd);
 
-                if (uv.uv_pipe_init(uv.Loop.get(), &this.pipe.?, 0) != 0) {
+                if (uv.uv_pipe_init(uv.Loop.get(), &pipe, 0) != 0) {
                     // This shouldn't actually happen, checked the libuv source and it always returns 0
                     @panic("Failed to create pipe");
                 }
 
-                if (uv.uv_pipe_open(&this.pipe.?, bun.uvfdcast(uvfd)).errEnum()) |e| {
+                if (uv.uv_pipe_open(&pipe, bun.uvfdcast(fd)).errEnum()) |e| {
                     return .{ .err = Syscall.Error.fromCode(e, .uv_pipe).withFd(fd) };
                 }
 
-                this.uvfd = uvfd;
+                this.pipe = pipe;
+                this.uvfd = fd;
 
                 return .{ .result = this };
             }
@@ -8117,3 +8141,99 @@ inline fn fastMod(val: anytype, comptime rhs: comptime_int) @TypeOf(val) {
 
     return val & (rhs - 1);
 }
+
+fn openat(dir: bun.FileDescriptor, path: [:0]const u8, flags: bun.Mode, perm: bun.Mode) Maybe(bun.FileDescriptor) {
+    var out_buffer: [bun.MAX_PATH_BYTES]u8 = undefined;
+    const dirpath = switch (Syscall.getFdPath(dir, &out_buffer)) {
+        .result => |dirpath| dirpath,
+        .err => |e| return .{ .err = e },
+    };
+    const parts: []const []const u8 = &[_][]const u8{
+        dirpath,
+        path[0..],
+    };
+    const joined = ResolvePath.joinZ(parts, .windows);
+
+    return bun.sys.open(joined, flags, perm);
+    // const joined_path = bun.strings.toWPath(&wide_buf, joined);
+}
+
+// fn openat(dir: bun.FileDescriptor, path: [:0]const u8, flags: bun.Mode, perm: bun.Mode) Maybe(bun.FileDescriptor) {
+//     _ = perm; // autofix
+
+//     const O = std.os.O;
+//     const w = std.os.windows;
+
+//     // var wbuf: bun.WPathBuffer = undefined;
+//     // const pathu16 = bun.strings.toNTPath(&wbuf, file_path);
+
+//     var wide_buf: [windows.PATH_MAX_WIDE]u16 = undefined;
+//     Syscall.getFdPath(fd: bun.FileDescriptor, out_buffer: *[MAX_PATH_BYTES]u8)
+//     const wide_slice = std.os.windows.GetFinalPathNameByHandle(dir.cast(), .{}, wide_buf[0..]) catch {
+//         @panic("TODO");
+//     };
+//     var out_buffer: [bun.MAX_PATH_BYTES]u8 = undefined;
+
+//     const dirpath = bun.strings.fromWPath(out_buffer[0..], wide_slice);
+
+//     const parts: []const []const u8 = &[_][]const u8{
+//         dirpath,
+//         path[0..],
+//     };
+//     const joined = ResolvePath.join(parts, .windows);
+
+//     const joined_path = bun.strings.toWPath(&wide_buf, joined);
+
+//     const nonblock = flags & O.NONBLOCK != 0;
+//     const overwrite = flags & O.WRONLY != 0 and flags & O.APPEND == 0;
+
+//     var access_mask: w.ULONG = w.READ_CONTROL | w.FILE_WRITE_ATTRIBUTES | w.SYNCHRONIZE;
+//     if (flags & O.RDWR != 0) {
+//         access_mask |= w.GENERIC_READ | w.GENERIC_WRITE;
+//     } else if (flags & O.APPEND != 0) {
+//         access_mask |= w.GENERIC_WRITE | w.FILE_APPEND_DATA;
+//     } else if (flags & O.WRONLY != 0) {
+//         access_mask |= w.GENERIC_WRITE;
+//     } else {
+//         access_mask |= w.GENERIC_READ;
+//     }
+
+//     const creation: w.ULONG = blk: {
+//         if (flags & O.CREAT != 0) {
+//             if (flags & O.EXCL != 0) {
+//                 break :blk w.FILE_CREATE;
+//             }
+//             break :blk if (overwrite) w.FILE_OVERWRITE_IF else w.FILE_OPEN_IF;
+//         }
+//         break :blk if (overwrite) w.FILE_OVERWRITE else w.FILE_OPEN;
+//     };
+//     _ = creation; // autofix
+
+//     const blocking_flag: windows.ULONG = if (!nonblock) windows.FILE_SYNCHRONOUS_IO_NONALERT else 0;
+//     const file_or_dir_flag: windows.ULONG = switch (flags & O.DIRECTORY != 0) {
+//         // .file_only => windows.FILE_NON_DIRECTORY_FILE,
+//         true => windows.FILE_DIRECTORY_FILE,
+//         false => 0,
+//     };
+//     const follow_symlinks = flags & O.NOFOLLOW == 0;
+
+//     const options: windows.ULONG = if (follow_symlinks) file_or_dir_flag | blocking_flag else file_or_dir_flag | windows.FILE_OPEN_REPARSE_POINT;
+//     _ = options; // autofix
+
+//     const return_value = windows.CreateFileW(
+//         joined_path,
+//         access_mask,
+//         w.FILE_SHARE_WRITE | w.FILE_SHARE_READ | w.FILE_SHARE_DELETE,
+//         null,
+//         w.OPEN_ALWAYS,
+//         // w.FILE_ATTRIBUTE_NORMAL | w.FILE_FLAG_POSIX_SEMANTICS,
+//         w.FILE_ATTRIBUTE_NORMAL | w.FILE_FLAG_BACKUP_SEMANTICS,
+//         null,
+//     );
+
+//     if (return_value == windows.INVALID_HANDLE_VALUE) @panic("FUCK");
+
+//     return .{
+//         .result = bun.toFD(return_value),
+//     };
+// }
