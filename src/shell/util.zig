@@ -81,7 +81,7 @@ pub const Stdio = union(enum) {
         }
     }
 
-    fn setUpChildIoUvSpawn(
+    pub fn setUpChildIoUvSpawn(
         stdio: @This(),
         std_fileno: i32,
         pipe: *uv.uv_pipe_t,
@@ -148,7 +148,7 @@ pub const Stdio = union(enum) {
                 .flags = uv.UV_IGNORE,
                 .data = undefined,
             },
-            .memfd => unreachable,
+            // .memfd => unreachable,
         };
     }
 };
