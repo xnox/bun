@@ -4094,7 +4094,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     bun.C.E.NAMETOOLONG => this.fmtErrorArena(kind, "{s}: File name too long\n", .{err.path}),
                     bun.C.E.ISDIR => this.fmtErrorArena(kind, "{s}: is a directory\n", .{err.path}),
                     bun.C.E.NOTEMPTY => this.fmtErrorArena(kind, "{s}: Directory not empty\n", .{err.path}),
-                    else => err.toSystemError().message.byteSlice(),
+                    else => this.fmtErrorArena(kind, "{s}\n", .{err.toSystemError().message.byteSlice()}),
                 };
             }
 
@@ -8247,6 +8247,15 @@ inline fn fastMod(val: anytype, comptime rhs: comptime_int) @TypeOf(val) {
 }
 
 fn openat(dir: bun.FileDescriptor, path: [:0]const u8, flags: bun.Mode, perm: bun.Mode) Maybe(bun.FileDescriptor) {
+    if (bun.Environment.isWindows) {
+        if (flags & os.O.DIRECTORY != 0) {
+            return switch (Syscall.openDirAtWindowsA(dir, path, true, flags & os.O.NOFOLLOW != 0)) {
+                .result => |fd| .{ .result = bun.toLibUVOwnedFD(fd) },
+                .err => |e| return .{ .err = e },
+            };
+        }
+    }
+
     const fd = switch (Syscall.openat(dir, path, flags, perm)) {
         .result => |fd| fd,
         .err => |e| return .{ .err = e },
