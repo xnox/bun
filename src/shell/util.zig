@@ -15,6 +15,7 @@ const PosixSpawn = @import("../bun.js/api/bun/spawn.zig").PosixSpawn;
 const os = std.os;
 const windows = bun.windows;
 const uv = windows.libuv;
+const Maybe = @import("../bun.js/node/types.zig").Maybe;
 
 pub const OutKind = enum { stdout, stderr };
 
@@ -86,68 +87,52 @@ pub const Stdio = union(enum) {
         std_fileno: i32,
         pipe: *uv.uv_pipe_t,
         isReadable: bool,
-        fd: bun.FileDescriptor,
-    ) !uv.uv_stdio_container_s {
+    ) Maybe(uv.uv_stdio_container_s) {
         return switch (stdio) {
             .array_buffer, .blob, .pipe => {
-                if (uv.uv_pipe_init(uv.Loop.get(), pipe, 0) != 0) {
-                    return error.FailedToCreatePipe;
-                }
-                if (fd != bun.invalid_fd) {
-                    // we receive a FD so we open this into our pipe
-                    if (uv.uv_pipe_open(pipe, bun.uvfdcast(fd)).errEnum()) |_| {
-                        return error.FailedToCreatePipe;
-                    }
-                    return uv.uv_stdio_container_s{
-                        .flags = @intCast(uv.UV_INHERIT_STREAM),
-                        .data = .{ .stream = @ptrCast(pipe) },
-                    };
+                const ret = uv.uv_pipe_init(uv.Loop.get(), pipe, 0);
+                if (ret != 0) {
+                    const e = uv.translateUVErrorToE(ret);
+                    return .{ .err = bun.sys.Error.fromCode(e, .uv_pipe) };
                 }
                 // we dont have any fd so we create a new pipe
-                return uv.uv_stdio_container_s{
+                return .{ .result = uv.uv_stdio_container_s{
                     .flags = @intCast(uv.UV_CREATE_PIPE | if (isReadable) uv.UV_READABLE_PIPE else uv.UV_WRITABLE_PIPE),
                     .data = .{ .stream = @ptrCast(pipe) },
-                };
+                } };
             },
             .inherit => {
+                // Same as above, create a pipe
                 if (stdio.inherit.captured != null) {
-                    if (uv.uv_pipe_init(uv.Loop.get(), pipe, 0) != 0) {
-                        return error.FailedToCreatePipe;
-                    }
-                    if (fd != bun.invalid_fd) {
-                        // we receive a FD so we open this into our pipe
-                        if (uv.uv_pipe_open(pipe, bun.uvfdcast(fd)).errEnum()) |_| {
-                            return error.FailedToCreatePipe;
-                        }
-                        return uv.uv_stdio_container_s{
-                            .flags = @intCast(uv.UV_INHERIT_STREAM),
-                            .data = .{ .stream = @ptrCast(pipe) },
-                        };
+                    const ret = uv.uv_pipe_init(uv.Loop.get(), pipe, 0);
+                    if (ret != 0) {
+                        const e = uv.translateUVErrorToE(ret);
+                        return .{ .err = bun.sys.Error.fromCode(e, .uv_pipe) };
                     }
                     // we dont have any fd so we create a new pipe
-                    return uv.uv_stdio_container_s{
+                    return .{ .result = uv.uv_stdio_container_s{
                         .flags = @intCast(uv.UV_CREATE_PIPE | if (isReadable) uv.UV_READABLE_PIPE else uv.UV_WRITABLE_PIPE),
                         .data = .{ .stream = @ptrCast(pipe) },
-                    };
+                    } };
                 }
 
-                return uv.uv_stdio_container_s{
+                return .{ .result = uv.uv_stdio_container_s{
                     .flags = uv.UV_INHERIT_FD,
                     .data = .{ .fd = std_fileno },
-                };
+                } };
             },
-            .fd => |_fd| uv.uv_stdio_container_s{
+            .fd => |_fd| .{ .result = uv.uv_stdio_container_s{
                 .flags = uv.UV_INHERIT_FD,
                 .data = .{ .fd = bun.uvfdcast(_fd) },
-            },
+            } },
             .path => |pathlike| {
                 _ = pathlike;
                 @panic("TODO");
             },
-            .ignore => uv.uv_stdio_container_s{
+            .ignore => .{ .result = uv.uv_stdio_container_s{
                 .flags = uv.UV_IGNORE,
                 .data = undefined,
-            },
+            } },
             // .memfd => unreachable,
         };
     }

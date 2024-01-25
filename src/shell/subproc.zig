@@ -19,6 +19,7 @@ const uws = bun.uws;
 const windows = bun.windows;
 const uv = windows.libuv;
 const Body = JSC.WebCore.Body;
+const shell = bun.shell;
 
 const PosixSpawn = @import("../bun.js/api/bun/spawn.zig").PosixSpawn;
 
@@ -446,12 +447,14 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                             subproc_readable_ptr.* = Readable{ .pipe = .{ .buffer = undefined } };
                             BufferedOutput.initWithAllocator(subproc, &subproc_readable_ptr.pipe.buffer, kind, allocator, stream_input, max_size);
                             subproc_readable_ptr.pipe.buffer.out = stdio.inherit.captured.?;
-                            subproc_readable_ptr.pipe.buffer.writer = BufferedOutput.CapturedBufferedWriter{
-                                .src = BufferedOutput.WriterSrc{
-                                    .inner = &subproc_readable_ptr.pipe.buffer,
-                                },
-                                .fd = if (kind == .stdout) bun.STDOUT_FD else bun.STDERR_FD,
-                                .parent = .{ .parent = &subproc_readable_ptr.pipe.buffer },
+                            const fd = if (kind == .stdout) shell.STDOUT_FD else shell.STDERR_FD;
+                            subproc_readable_ptr.pipe.buffer.writer = switch (BufferedOutput.CapturedBufferedWriter.init(
+                                fd,
+                                BufferedOutput.WriterSrc{ .inner = &subproc_readable_ptr.pipe.buffer },
+                                .{ .parent = &subproc_readable_ptr.pipe.buffer },
+                            )) {
+                                .result => |bw| bw,
+                                .err => @panic("FIXME"),
                             };
                             return subproc_readable_ptr.*;
                         }
@@ -620,7 +623,16 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                 }
             };
 
-            pub const CapturedBufferedWriter = bun.shell.eval.NewBufferedWriter(
+            pub const CapturedBufferedWriter = if (bun.Environment.isWindows) bun.shell.eval.NewBufferedPipeWriter(
+                WriterSrc,
+                struct {
+                    parent: *BufferedOutput,
+                    pub inline fn onDone(this: @This(), e: ?bun.sys.Error) void {
+                        this.parent.onBufferedWriterDone(e);
+                    }
+                },
+                EventLoopKind,
+            ) else bun.shell.eval.NewBufferedFdWriter(
                 WriterSrc,
                 struct {
                     parent: *BufferedOutput,
@@ -705,7 +717,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
             }
 
             pub fn signalDoneToCmd(this: *BufferedOutput) void {
-                log("signalDoneToCmd ({x}: {s}) isDone={any}", .{ @intFromPtr(this), @tagName(this.out_type), this.isDone() });
+                log("signalDoneToCmd ({x}: {s}) isDone={any} status={s}", .{ @intFromPtr(this), @tagName(this.out_type), this.isDone(), @tagName(this.status) });
                 // `this.fifo.close()` will be called from the parent
                 // this.fifo.close();
                 if (!this.isDone()) return;
@@ -782,6 +794,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
             }
 
             fn uvStreamReadCallback(handle: *uv.uv_handle_t, nread: isize, buffer: *const uv.uv_buf_t) callconv(.C) void {
+                log("uvStreamReadCallback nread={d}", .{nread});
                 const this: *BufferedOutput = @ptrCast(@alignCast(handle.data));
                 if (nread <= 0) {
                     switch (nread) {
@@ -841,6 +854,9 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
             }
 
             fn flushBufferedDataIntoReadableStream(this: *BufferedOutput) void {
+                if (this.writer != null) {
+                    this.writer.?.writeIfPossible(false);
+                }
                 if (this.readable_stream_ref.get()) |readable| {
                     if (readable.ptr != .Bytes) return;
 
@@ -894,7 +910,12 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                 if (Environment.isWindows) {
                     if (this.status == .pending) {
                         this.stream.data = this;
-                        _ = uv.uv_read_start(@ptrCast(this.stream), BufferedOutput.uvStreamAllocCallback, BufferedOutput.uvStreamReadCallback);
+                        log("uv_read_start({x})", .{@intFromPtr(this.stream)});
+                        const rc = uv.uv_read_start(@ptrCast(this.stream), BufferedOutput.uvStreamAllocCallback, BufferedOutput.uvStreamReadCallback);
+                        if (rc < 0) {
+                            const errno = uv.translateUVErrorToE(rc);
+                            std.debug.print("FIXME: {s}", .{@tagName(errno)});
+                        }
                     }
                     return;
                 }
@@ -1740,6 +1761,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
 
         fn uvExitCallback(process: *uv.uv_process_t, exit_status: i64, term_signal: c_int) callconv(.C) void {
             const subprocess: *Subprocess = @alignCast(@ptrCast(process.data.?));
+            log("uvExitCallback *subproc={x} exit={d}", .{ @intFromPtr(subprocess), exit_status });
             if (EventLoopKind == .js) {
                 subprocess.globalThis.assertOnJSThread();
             }
@@ -1780,20 +1802,30 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
 
                 const alloc = globalThis.allocator();
                 var subprocess = alloc.create(Subprocess) catch bun.outOfMemory();
+                subprocess.pipes = std.mem.zeroes([3]uv.uv_pipe_t);
 
                 // spawn_args.stdio
                 var uv_stdio = [3]uv.uv_stdio_container_s{
-                    spawn_args.stdio[0].setUpChildIoUvSpawn(0, &subprocess.pipes[0], true, bun.invalid_fd) catch |err| {
-                        alloc.destroy(subprocess);
-                        return .{ .err = globalThis.handleError(err, "in setting up uv_process stdin") };
+                    switch (spawn_args.stdio[0].setUpChildIoUvSpawn(0, &subprocess.pipes[0], true)) {
+                        .result => |x| x,
+                        .err => |err| {
+                            alloc.destroy(subprocess);
+                            return .{ .err = bun.shell.ShellErr.newSys(err) };
+                        },
                     },
-                    spawn_args.stdio[1].setUpChildIoUvSpawn(1, &subprocess.pipes[1], false, bun.invalid_fd) catch |err| {
-                        alloc.destroy(subprocess);
-                        return .{ .err = globalThis.handleError(err, "in setting up uv_process stdout") };
+                    switch (spawn_args.stdio[1].setUpChildIoUvSpawn(1, &subprocess.pipes[1], false)) {
+                        .result => |x| x,
+                        .err => |err| {
+                            alloc.destroy(subprocess);
+                            return .{ .err = bun.shell.ShellErr.newSys(err) };
+                        },
                     },
-                    spawn_args.stdio[2].setUpChildIoUvSpawn(2, &subprocess.pipes[2], false, bun.invalid_fd) catch |err| {
-                        alloc.destroy(subprocess);
-                        return .{ .err = globalThis.handleError(err, "in setting up uv_process stderr") };
+                    switch (spawn_args.stdio[2].setUpChildIoUvSpawn(2, &subprocess.pipes[2], false)) {
+                        .result => |x| x,
+                        .err => |err| {
+                            alloc.destroy(subprocess);
+                            return .{ .err = bun.shell.ShellErr.newSys(err) };
+                        },
                     },
                 };
 
@@ -1822,6 +1854,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                     return .{ .err = bun.shell.ShellErr.newSys(bun.sys.Error.fromCode(errno, .uv_spawn)) };
                 }
 
+                out_subproc.* = subprocess;
                 // When run synchronously, subprocess isn't garbage collected
                 subprocess.* = Subprocess{
                     .pipes = subprocess.pipes,
@@ -1841,6 +1874,8 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                     .flags = .{
                         .is_sync = is_sync,
                     },
+
+                    .cmd_parent = spawn_args.cmd_parent,
                 };
                 subprocess.pid.data = subprocess;
                 // std.debug.assert(ipc_mode == .none); //TODO:
@@ -1960,7 +1995,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
             spawn_args.stdio[0].setUpChildIoPosixSpawn(
                 &actions,
                 stdin_pipe,
-                bun.STDIN_FD,
+                shell.STDIN_FD,
             ) catch |err| {
                 return .{ .err = globalThis.handleError(err, "in configuring child stdin") };
             };
@@ -1968,7 +2003,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
             spawn_args.stdio[1].setUpChildIoPosixSpawn(
                 &actions,
                 stdout_pipe,
-                bun.STDOUT_FD,
+                shell.STDOUT_FD,
             ) catch |err| {
                 return .{ .err = globalThis.handleError(err, "in configuring child stdout") };
             };
@@ -1976,7 +2011,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
             spawn_args.stdio[2].setUpChildIoPosixSpawn(
                 &actions,
                 stderr_pipe,
-                bun.STDERR_FD,
+                shell.STDERR_FD,
             ) catch |err| {
                 return .{ .err = globalThis.handleError(err, "in configuring child stderr") };
             };

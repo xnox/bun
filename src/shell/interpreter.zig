@@ -57,11 +57,6 @@ const GlobWalker = @import("../glob.zig").GlobWalker_(null, true);
 //     pipe:
 // } else bun.FileDescriptor;
 
-/// Using these instead of `bun.STD{IN,OUT,ERR}_FD` to makesure we use uv fd
-const STDIN_FD: bun.FileDescriptor = if (bun.Environment.isWindows) bun.FDImpl.fromUV(0).encode() else bun.STDIN_FD;
-const STDOUT_FD: bun.FileDescriptor = if (bun.Environment.isWindows) bun.FDImpl.fromUV(1).encode() else bun.STDOUT_FD;
-const STDERR_FD: bun.FileDescriptor = if (bun.Environment.isWindows) bun.FDImpl.fromUV(2).encode() else bun.STDERR_FD;
-
 pub const SUBSHELL_TODO_ERROR = "Subshells are not implemented, please open GitHub issue.";
 const stdin_no = 0;
 const stdout_no = 1;
@@ -804,7 +799,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                 switch (io.*) {
                     .std => |val| {
-                        const fd = if (iotype == .stdout) STDOUT_FD else STDERR_FD;
+                        const fd = if (iotype == .stdout) shell.STDOUT_FD else shell.STDERR_FD;
                         const bw = switch (BufferedWriter.init(fd, buf, BufferedWriter.ParentPtr.init(ctx), val.captured)) {
                             .result => |bw| bw,
                             .err => |e| {
@@ -816,7 +811,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         return .yield;
                     },
                     .fd => {
-                        const fd = if (iotype == .stdout) STDOUT_FD else STDERR_FD;
+                        const fd = if (iotype == .stdout) shell.STDOUT_FD else shell.STDERR_FD;
                         const bw = switch (BufferedWriter.init(fd, buf, BufferedWriter.ParentPtr.init(ctx), null)) {
                             .result => |bw| bw,
                             .err => |e| {
@@ -3451,8 +3446,8 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
             /// Called by Subprocess
             pub fn onExit(this: *Cmd, exit_code: ExitCode) void {
-                log("cmd exit code={d} ({x})", .{ exit_code, @intFromPtr(this) });
                 this.exit_code = exit_code;
+                log("cmd exit code={d} ({x}) has_finished={any}", .{ exit_code, @intFromPtr(this), this.hasFinished() });
 
                 const has_finished = this.hasFinished();
                 if (has_finished) {
@@ -3660,7 +3655,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 pub fn asFd(this: *BuiltinIO) ?bun.FileDescriptor {
                     return switch (this.*) {
                         .fd => this.fd,
-                        .captured => if (this.captured.out_kind == .stdout) STDOUT_FD else STDERR_FD,
+                        .captured => if (this.captured.out_kind == .stdout) shell.STDOUT_FD else shell.STDERR_FD,
                         else => null,
                     };
                 }
@@ -3668,7 +3663,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 pub fn expectFd(this: *BuiltinIO) bun.FileDescriptor {
                     return switch (this.*) {
                         .fd => this.fd,
-                        .captured => if (this.captured.out_kind == .stdout) STDOUT_FD else STDERR_FD,
+                        .captured => if (this.captured.out_kind == .stdout) shell.STDOUT_FD else shell.STDERR_FD,
                         else => @panic("No fd"),
                     };
                 }
@@ -3692,7 +3687,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             this.buf.deinit();
                         },
                         .fd => {
-                            if (this.fd != bun.invalid_fd and this.fd != STDIN_FD) {
+                            if (this.fd != bun.invalid_fd and this.fd != shell.STDIN_FD) {
                                 _ = Syscall.close(this.fd);
                                 this.fd = bun.invalid_fd;
                             }
@@ -3785,19 +3780,19 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 const io = io_.*;
 
                 const stdin: Builtin.BuiltinIO = switch (io.stdin) {
-                    .std => .{ .fd = STDIN_FD },
+                    .std => .{ .fd = shell.STDIN_FD },
                     .fd => |fd| .{ .fd = fd },
                     .pipe => .{ .buf = std.ArrayList(u8).init(interpreter.allocator) },
                     .ignore => .ignore,
                 };
                 const stdout: Builtin.BuiltinIO = switch (io.stdout) {
-                    .std => if (io.stdout.std.captured) |bytelist| .{ .captured = .{ .out_kind = .stdout, .bytelist = bytelist } } else .{ .fd = STDOUT_FD },
+                    .std => if (io.stdout.std.captured) |bytelist| .{ .captured = .{ .out_kind = .stdout, .bytelist = bytelist } } else .{ .fd = shell.STDOUT_FD },
                     .fd => |fd| .{ .fd = fd },
                     .pipe => .{ .buf = std.ArrayList(u8).init(interpreter.allocator) },
                     .ignore => .ignore,
                 };
                 const stderr: Builtin.BuiltinIO = switch (io.stderr) {
-                    .std => if (io.stderr.std.captured) |bytelist| .{ .captured = .{ .out_kind = .stderr, .bytelist = bytelist } } else .{ .fd = STDERR_FD },
+                    .std => if (io.stderr.std.captured) |bytelist| .{ .captured = .{ .out_kind = .stderr, .bytelist = bytelist } } else .{ .fd = shell.STDERR_FD },
                     .fd => |fd| .{ .fd = fd },
                     .pipe => .{ .buf = std.ArrayList(u8).init(interpreter.allocator) },
                     .ignore => .ignore,
@@ -6802,7 +6797,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             const bo = BlockingOutput{
                                 .arr = arr,
                                 .writer = switch (BufferedWriter.init(
-                                    STDOUT_FD,
+                                    shell.STDOUT_FD,
                                     arr.items[0..],
                                     BufferedWriter.ParentPtr.init(this.task_manager.rm),
                                     this.task_manager.rm.bltn.stdBufferedBytelist(.stdout),
@@ -7924,10 +7919,12 @@ const SliceBufferSrc = struct {
     }
 };
 
+// pub const CapturedBufferWriter = if (bun.Environment.isWindows) NewBufferedPipeWriter else NewBufferedFdWriter;
+
 /// This is modified version of BufferedInput for file descriptors only. This
 /// struct cleans itself up when it is done, so no need to call `.deinit()` on
 /// it.
-pub fn NewBufferedWriter(comptime Src: type, comptime Parent: type, comptime EventLoopKind: JSC.EventLoopKind) type {
+pub fn NewBufferedFdWriter(comptime Src: type, comptime Parent: type, comptime EventLoopKind: JSC.EventLoopKind) type {
     const SrcHandler = struct {
         src: Src,
 
@@ -7960,6 +7957,16 @@ pub fn NewBufferedWriter(comptime Src: type, comptime Parent: type, comptime Eve
 
         pub const event_loop_kind = EventLoopKind;
         pub usingnamespace JSC.WebCore.NewReadyWatcher(@This(), .writable, onReady);
+
+        pub fn init(fd: bun.FileDescriptor, src: Src, parent: Parent) Maybe(@This()) {
+            const this: @This() = .{
+                .src = src,
+                .fd = fd,
+                .parent = parent,
+            };
+
+            return .{ .result = this };
+        }
 
         pub fn onReady(this: *@This(), _: i64) void {
             if (this.fd == bun.invalid_fd) {
@@ -8091,6 +8098,130 @@ pub fn NewBufferedWriter(comptime Src: type, comptime Parent: type, comptime Eve
                 // _ = bun.sys.close(this.fd);
                 // this.fd = bun.invalid_fd;
             }
+        }
+
+        pub fn deinit(this: *@This()) void {
+            this.close();
+            this.parent.onDone(this.err);
+        }
+    };
+}
+
+pub fn NewBufferedPipeWriter(comptime Src: type, comptime Parent: type, comptime EventLoopKind: JSC.EventLoopKind) type {
+    _ = EventLoopKind; // autofix
+
+    const SrcHandler = struct {
+        src: Src,
+
+        inline fn bufToWrite(src: Src, written: usize) []const u8 {
+            if (!@hasDecl(Src, "bufToWrite")) @compileError("Need `bufToWrite`");
+            return src.bufToWrite(written);
+        }
+
+        inline fn isDone(src: Src, written: usize) bool {
+            if (!@hasDecl(Src, "isDone")) @compileError("Need `bufToWrite`");
+            return src.isDone(written);
+        }
+    };
+
+    return struct {
+        src: Src,
+        fd: bun.FileDescriptor = bun.invalid_fd,
+        input_buffer: uv.uv_buf_t = std.mem.zeroes(uv.uv_buf_t),
+        write_req: uv.fs_t = std.mem.zeroes(uv.fs_t),
+        poll_ref: ?*bun.Async.FilePoll = null,
+        written: usize = 0,
+        parent: Parent,
+        started: bool = true,
+        err: ?Syscall.Error = null,
+
+        pub fn isDone(this: *@This()) bool {
+            return SrcHandler.isDone(this.src, this.written) or this.err != null;
+        }
+
+        pub fn init(fd: bun.FileDescriptor, src: Src, parent: Parent) Maybe(@This()) {
+            var this: @This() = .{
+                .src = src,
+                .parent = parent,
+            };
+
+            if (bun.Environment.allow_assert) {
+                const kind = bun.FDImpl.decode(fd).kind;
+                std.debug.assert(kind == .uv);
+            }
+
+            this.fd = fd;
+
+            return .{ .result = this };
+        }
+
+        pub fn uvFsCallback(req: *uv.fs_t) callconv(.C) void {
+            const this = bun.cast(*@This(), req.data);
+            if (req.result.errEnum()) |e| {
+                log("uv_fs_write() fail: {s}", .{@tagName(e)});
+                this.err = Syscall.Error.fromCode(e, .write);
+                this.deinit();
+                return;
+            }
+            const written: u32 = @intCast(req.result.value);
+            log("uv_fs_write({d})", .{written});
+
+            this.written += written;
+            const to_write = SrcHandler.bufToWrite(this.src, this.written);
+            if (to_write.len == 0) {
+                if (SrcHandler.isDone(this.src, this.written)) {
+                    this.deinit();
+                    return;
+                }
+            }
+        }
+
+        pub fn writeIfPossible(this: *@This(), comptime is_sync: bool) void {
+            this.writeAllowBlocking(is_sync);
+        }
+
+        pub fn writeAllowBlocking(this: *@This(), allow_blocking: bool) void {
+            _ = allow_blocking; // autofix
+
+            const to_write = SrcHandler.bufToWrite(this.src, this.written);
+            log("writeAllowBlocking({d})", .{to_write.len});
+            if (to_write.len == 0) {
+                if (SrcHandler.isDone(this.src, this.written)) {
+                    this.deinit();
+                }
+                return;
+            }
+
+            this.write_req.data = @ptrCast(this);
+            this.input_buffer = uv.uv_buf_t.init(to_write);
+            const ret = uv.uv_fs_write(uv.Loop.get(), &this.write_req, bun.uvfdcast(this.fd), @ptrCast(&this.input_buffer), 1, 0, uvFsCallback);
+            if (ret.errEnum()) |e| {
+                this.err = Syscall.Error.fromCode(e, .write);
+                this.deinit();
+                return;
+            }
+            this.started = true;
+        }
+
+        pub fn write(this: *@This()) void {
+            this.writeAllowBlocking(false);
+        }
+
+        fn close(this: *@This()) void {
+            if (this.poll_ref) |poll| {
+                this.poll_ref = null;
+                poll.deinit();
+            }
+
+            if (this.started) {
+                uv.uv_fs_req_cleanup(&this.write_req);
+            }
+
+            // if (this.fd != bun.invalid_fd) {
+            //     if (bun.FDImpl.decode(this.fd).close()) |e| {
+            //         bun.Output.debugWarn("closing uvfd failed: {anytype}", .{e});
+            //     }
+            // }
         }
 
         pub fn deinit(this: *@This()) void {
