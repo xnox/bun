@@ -460,7 +460,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                     },
                     .path => Readable{ .ignore = {} },
                     .blob, .fd => if (Environment.isWindows)
-                        @compileError("Called Readable.init() with a file descriptor instead of a *uv.uv_pipe_t")
+                        @panic("Called Readable.init() with a file descriptor instead of a *uv.uv_pipe_t")
                     else
                         Readable{ .fd = stream_input },
                     .array_buffer => {
@@ -657,6 +657,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
             }
 
             pub fn initWithArrayBuffer(subproc: *Subprocess, out: *BufferedOutput, comptime out_type: OutKind, stream_input: StreamInput, array_buf: JSC.ArrayBuffer.Strong) void {
+                if (Environment.isWindows) @panic("FIXME!");
                 out.* = BufferedOutput.initWithSlice(subproc, out_type, stream_input, array_buf.slice());
                 out.from_jsc = true;
                 out.stream.view = array_buf.held;
@@ -1868,7 +1869,8 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                 }
 
                 // if (comptime !is_sync) {
-                return out;
+                // return out;
+                return .{ .result = subprocess };
                 // }
 
                 // // sync
@@ -2334,7 +2336,11 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
         }
 
         fn runOnExit(this: *@This(), globalThis: GlobalRef) void {
-            log("run on exit {d}", .{this.pid});
+            if (Environment.isWindows) {
+                log("run on exit {d}", .{@intFromPtr(this.pid.data)});
+            } else {
+                log("run on exit {d}", .{this.pid});
+            }
             _ = globalThis;
             const waitpid_error = this.waitpid_err;
             _ = waitpid_error;
@@ -2382,7 +2388,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
             this: *@This(),
             globalThis: GlobalRef,
         ) void {
-            log("onExit({d}) = {d}, \"{s}\"", .{ this.pid, if (this.exit_code) |e| @as(i32, @intCast(e)) else -1, if (this.signal_code) |code| @tagName(code) else "" });
+            log("onExit({d}) = {d}, \"{s}\"", .{ if (Environment.isWindows) @intFromPtr(this.pid.data) else this.pid, if (this.exit_code) |e| @as(i32, @intCast(e)) else -1, if (this.signal_code) |code| @tagName(code) else "" });
             // defer this.updateHasPendingActivity();
 
             if (this.hasExited()) {
