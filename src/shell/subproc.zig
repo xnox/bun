@@ -462,10 +462,12 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                         return Readable{ .inherit = {} };
                     },
                     .path => Readable{ .ignore = {} },
-                    .blob, .fd => if (Environment.isWindows)
-                        @panic("Called Readable.init() with a file descriptor instead of a *uv.uv_pipe_t")
-                    else
-                        Readable{ .fd = stream_input },
+                    .blob, .fd => {
+                        if (Environment.isWindows) {
+                            return .ignore;
+                        }
+                        return Readable{ .fd = stream_input };
+                    },
                     .array_buffer => {
                         var subproc_readable_ptr = subproc.getIO(kind);
                         subproc_readable_ptr.* = Readable{
