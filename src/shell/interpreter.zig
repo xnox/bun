@@ -713,7 +713,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     break :brk cwd_str;
                 };
 
-                const new_cwd_fd = switch (openat(
+                const new_cwd_fd = switch (ShellSyscall.openat(
                     this.cwd_fd,
                     new_cwd,
                     std.os.O.DIRECTORY | std.os.O.RDONLY,
@@ -721,7 +721,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 )) {
                     .result => |fd| fd,
                     .err => |err| {
-                        return Maybe(void).initErr(err);
+                        return Maybe(void).initErr(err.clone(bun.default_allocator) catch bun.outOfMemory());
                     },
                 };
                 _ = Syscall.close2(this.cwd_fd);
@@ -1005,7 +1005,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             // export_env.put("PWD", cwd) catch bun.outOfMemory();
             // export_env.put("OLDPWD", "/") catch bun.outOfMemory();
 
-            const cwd_fd = switch (open(cwd, std.os.O.DIRECTORY | std.os.O.RDONLY, 0)) {
+            const cwd_fd = switch (ShellSyscall.open(cwd, std.os.O.DIRECTORY | std.os.O.RDONLY, 0)) {
                 .result => |fd| fd,
                 .err => |err| {
                     return .{ .err = .{ .sys = err.toSystemError() } };
@@ -3358,7 +3358,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             // const perm = 0o666;
                             const perm = 0o664;
                             const extra: bun.Mode = if (this.node.redirect.append) O.APPEND else O.TRUNC;
-                            const redirfd = switch (openat(this.base.shell.cwd_fd, path, O.WRONLY | O.CREAT | extra | O.NONBLOCK, perm)) {
+                            const redirfd = switch (ShellSyscall.openat(this.base.shell.cwd_fd, path, O.WRONLY | O.CREAT | extra | O.NONBLOCK, perm)) {
                                 .err => |e| {
                                     const buf = std.fmt.allocPrint(this.spawn_arena.allocator(), "bun: {s}: {s}", .{ e.toSystemError().message, path }) catch bun.outOfMemory();
                                     _ = this.writeFailingError(buf, 1);
@@ -3900,7 +3900,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             const extra: bun.Mode = if (node.redirect.append) O.APPEND else O.TRUNC;
                             _ = extra; // autofix
                             // const redirfd = switch (openat(cmd.base.shell.cwd_fd, path, O.WRONLY | O.CREAT | extra | O.NONBLOCK, perm)) {
-                            const redirfd = switch (openat(cmd.base.shell.cwd_fd, path, std.os.O.WRONLY | std.os.O.CREAT | std.os.O.NONBLOCK, perm)) {
+                            const redirfd = switch (ShellSyscall.openat(cmd.base.shell.cwd_fd, path, std.os.O.WRONLY | std.os.O.CREAT | std.os.O.NONBLOCK, perm)) {
                                 .err => |e| {
                                     const buf = std.fmt.allocPrint(arena.allocator(), "bun: {s}: {s}", .{ e.toSystemError().message, path }) catch bun.outOfMemory();
                                     cmd.writeFailingError(buf, 1);
@@ -4857,7 +4857,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                         task.schedule();
                                     }
                                 } else {
-                                    var task = ShellLsTask.create(this, this.opts, &this.state.exec.task_count, cwd, ".", null);
+                                    var task = if (bun.Environment.isWindows) ShellLsTask.create(this, this.opts, &this.state.exec.task_count, cwd, "", null) else ShellLsTask.create(this, this.opts, &this.state.exec.task_count, cwd, ".", null);
                                     task.schedule();
                                 }
                             },
@@ -5088,7 +5088,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     }
 
                     pub fn run(this: *@This()) void {
-                        const fd = switch (openat(this.cwd, this.path, os.O.RDONLY | os.O.DIRECTORY, 0)) {
+                        const fd = switch (ShellSyscall.openat(this.cwd, this.path, os.O.RDONLY | os.O.DIRECTORY, 0)) {
                             .err => |e| {
                                 switch (e.getErrno()) {
                                     bun.C.E.NOENT => {
@@ -5666,7 +5666,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     task: shell.eval.ShellTask(@This(), EventLoopKind, runFromThreadPool, runFromMainThread, print),
 
                     pub fn runFromThreadPool(this: *@This()) void {
-                        const fd = switch (openat(this.cwd, this.target, os.O.RDONLY | os.O.DIRECTORY, 0)) {
+                        const fd = switch (ShellSyscall.openat(this.cwd, this.target, os.O.RDONLY | os.O.DIRECTORY, 0)) {
                             .err => |e| {
                                 switch (e.getErrno()) {
                                     bun.C.E.NOTDIR => {
@@ -7056,7 +7056,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         }
 
                         const flags = os.O.DIRECTORY | os.O.RDONLY;
-                        const fd = switch (openat(dirfd, path, flags, 0)) {
+                        const fd = switch (ShellSyscall.openat(dirfd, path, flags, 0)) {
                             .result => |fd| fd,
                             .err => |e| {
                                 switch (e.getErrno()) {
@@ -7127,7 +7127,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                         if (this.error_signal.load(.SeqCst)) return Maybe(void).success;
 
-                        switch (Syscall.unlinkatWithFlags(dirfd, path, std.os.AT.REMOVEDIR)) {
+                        switch (ShellSyscall.unlinkatWithFlags(dirfd, path, std.os.AT.REMOVEDIR)) {
                             .result => {
                                 switch (this.verboseDeleted(dir_task, path)) {
                                     .err => |e| return .{ .err = e },
@@ -7159,7 +7159,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         var treat_as_dir = true;
                         const fd: bun.FileDescriptor = handle_entry: while (true) {
                             if (treat_as_dir) {
-                                switch (openat(dirfd, dir_task.path, os.O.DIRECTORY | os.O.RDONLY, 0)) {
+                                switch (ShellSyscall.openat(dirfd, dir_task.path, os.O.DIRECTORY | os.O.RDONLY, 0)) {
                                     .err => |e| switch (e.getErrno()) {
                                         bun.C.E.NOENT => {
                                             if (this.opts.force) {
@@ -7177,7 +7177,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                     .result => |fd| break :handle_entry fd,
                                 }
                             } else {
-                                if (Syscall.unlinkat(dirfd, dir_task.path).asErr()) |e| {
+                                if (ShellSyscall.unlinkatWithFlags(dirfd, dir_task.path, 0).asErr()) |e| {
                                     switch (e.getErrno()) {
                                         bun.C.E.NOENT => {
                                             if (this.opts.force) {
@@ -7205,7 +7205,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             _ = Syscall.close(fd);
                         }
 
-                        switch (Syscall.unlinkatWithFlags(dirfd, dir_task.path, std.os.AT.REMOVEDIR)) {
+                        switch (ShellSyscall.unlinkatWithFlags(dirfd, dir_task.path, std.os.AT.REMOVEDIR)) {
                             .result => {
                                 switch (this.verboseDeleted(dir_task, dir_task.path)) {
                                     .err => |e| return .{ .err = e },
@@ -7237,7 +7237,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         comptime is_file_in_dir: bool,
                     ) Maybe(void) {
                         const dirfd = bun.toFD(this.cwd);
-                        switch (Syscall.unlinkatWithFlags(dirfd, path, 0)) {
+                        switch (ShellSyscall.unlinkatWithFlags(dirfd, path, 0)) {
                             .result => return this.verboseDeleted(parent_dir_task, path),
                             .err => |e| {
                                 switch (e.getErrno()) {
@@ -7264,7 +7264,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                                 // If `path` points to a directory, then it is deleted (if empty) or we handle it as a directory
                                                 // If it's actually a file, we get an error so we don't need to call `stat` to check that.
                                                 if (this.opts.recursive or this.opts.remove_empty_dirs) {
-                                                    return switch (Syscall.unlinkatWithFlags(dirfd, path, std.os.AT.REMOVEDIR)) {
+                                                    return switch (ShellSyscall.unlinkatWithFlags(dirfd, path, std.os.AT.REMOVEDIR)) {
                                                         // it was empty, we saved a syscall
                                                         .result => return this.verboseDeleted(parent_dir_task, path),
                                                         .err => |e2| {
@@ -8246,36 +8246,62 @@ inline fn fastMod(val: anytype, comptime rhs: comptime_int) @TypeOf(val) {
     return val & (rhs - 1);
 }
 
-fn openat(dir: bun.FileDescriptor, path: [:0]const u8, flags: bun.Mode, perm: bun.Mode) Maybe(bun.FileDescriptor) {
-    if (bun.Environment.isWindows) {
-        if (flags & os.O.DIRECTORY != 0) {
-            return switch (Syscall.openDirAtWindowsA(dir, path, true, flags & os.O.NOFOLLOW != 0)) {
-                .result => |fd| .{ .result = bun.toLibUVOwnedFD(fd) },
-                .err => |e| return .{ .err = e },
+/// Shell modifications for syscalls.
+/// Any function that returns a file descriptor will return a uv file descriptor
+const ShellSyscall = struct {
+    fn openat(dir: bun.FileDescriptor, path: [:0]const u8, flags: bun.Mode, perm: bun.Mode) Maybe(bun.FileDescriptor) {
+        if (bun.Environment.isWindows) {
+            if (flags & os.O.DIRECTORY != 0) {
+                return switch (Syscall.openDirAtWindowsA(dir, path, true, flags & os.O.NOFOLLOW != 0)) {
+                    .result => |fd| .{ .result = bun.toLibUVOwnedFD(fd) },
+                    .err => |e| return .{ .err = e.withPath(path) },
+                };
+            }
+        }
+
+        const fd = switch (Syscall.openat(dir, path, flags, perm)) {
+            .result => |fd| fd,
+            .err => |e| return .{ .err = e.withPath(path) },
+        };
+        if (bun.Environment.isWindows) {
+            return .{ .result = bun.toLibUVOwnedFD(fd) };
+        }
+        return fd;
+    }
+
+    pub fn open(file_path: [:0]const u8, flags: bun.Mode, perm: bun.Mode) Maybe(bun.FileDescriptor) {
+        const fd = switch (Syscall.open(file_path, flags, perm)) {
+            .result => |fd| fd,
+            .err => |e| return .{ .err = e },
+        };
+        if (bun.Environment.isWindows) {
+            return .{ .result = bun.toLibUVOwnedFD(fd) };
+        }
+        return fd;
+    }
+
+    pub fn unlinkatWithFlags(dirfd: bun.FileDescriptor, to: [:0]const u8, flags: c_uint) Maybe(void) {
+        if (bun.Environment.isWindows) {
+            if (ResolvePath.Platform.isAbsolute(.windows, to[0..to.len])) return Syscall.unlink(to);
+            var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+            const dirpath = switch (Syscall.getFdPath(dirfd, &buf)) {
+                .result => |path| path,
+                .err => |e| return .{ .err = e.withFd(dirfd) },
+            };
+
+            const parts: []const []const u8 = &.{
+                dirpath[0..],
+                to[0..],
+            };
+            const joined = ResolvePath.joinZ(parts, .auto);
+            return switch (Syscall.unlink(joined)) {
+                .result => return Maybe(void).success,
+                .err => |e| return .{ .err = e.withPath(bun.default_allocator.dupe(u8, joined) catch bun.outOfMemory()) },
             };
         }
+        return Syscall.unlinkatWithFlags(dirfd, to, flags);
     }
-
-    const fd = switch (Syscall.openat(dir, path, flags, perm)) {
-        .result => |fd| fd,
-        .err => |e| return .{ .err = e },
-    };
-    if (bun.Environment.isWindows) {
-        return .{ .result = bun.toLibUVOwnedFD(fd) };
-    }
-    return fd;
-}
-
-pub fn open(file_path: [:0]const u8, flags: bun.Mode, perm: bun.Mode) Maybe(bun.FileDescriptor) {
-    const fd = switch (Syscall.open(file_path, flags, perm)) {
-        .result => |fd| fd,
-        .err => |e| return .{ .err = e },
-    };
-    if (bun.Environment.isWindows) {
-        return .{ .result = bun.toLibUVOwnedFD(fd) };
-    }
-    return fd;
-}
+};
 
 // fn openat(dir: bun.FileDescriptor, path: [:0]const u8, flags: bun.Mode, perm: bun.Mode) Maybe(bun.FileDescriptor) {
 //     _ = perm; // autofix
