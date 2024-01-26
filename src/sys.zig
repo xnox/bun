@@ -1205,9 +1205,18 @@ pub fn fcopyfile(fd_in: bun.FileDescriptor, fd_out: bun.FileDescriptor, flags: u
 
 pub fn unlink(from: [:0]const u8) Maybe(void) {
     while (true) {
-        if (Maybe(void).errnoSys(sys.unlink(from), .unlink)) |err| {
-            if (err.getErrno() == .INTR) continue;
-            return err;
+        if (bun.Environment.isWindows) {
+            if (sys.unlink(from) != 0) {
+                const last_error = kernel32.GetLastError();
+                const errno = Syscall.getErrno(@as(u16, @intFromEnum(last_error)));
+                if (errno == .INTR) continue;
+                return .{ .err = Syscall.Error.fromCode(errno, .unlink) };
+            }
+        } else {
+            if (Maybe(void).errnoSys(sys.unlink(from), .unlink)) |err| {
+                if (err.getErrno() == .INTR) continue;
+                return err;
+            }
         }
         return Maybe(void).success;
     }
