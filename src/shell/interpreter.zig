@@ -3898,9 +3898,8 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             // const perm = 0o666;
                             const perm = 0o664;
                             const extra: bun.Mode = if (node.redirect.append) O.APPEND else O.TRUNC;
-                            _ = extra; // autofix
                             // const redirfd = switch (openat(cmd.base.shell.cwd_fd, path, O.WRONLY | O.CREAT | extra | O.NONBLOCK, perm)) {
-                            const redirfd = switch (ShellSyscall.openat(cmd.base.shell.cwd_fd, path, std.os.O.WRONLY | std.os.O.CREAT | std.os.O.NONBLOCK, perm)) {
+                            const redirfd = switch (ShellSyscall.openat(cmd.base.shell.cwd_fd, path, std.os.O.WRONLY | std.os.O.CREAT | std.os.O.NONBLOCK | extra, perm)) {
                                 .err => |e| {
                                     const buf = std.fmt.allocPrint(arena.allocator(), "bun: {s}: {s}", .{ e.toSystemError().message, path }) catch bun.outOfMemory();
                                     cmd.writeFailingError(buf, 1);
@@ -8366,7 +8365,7 @@ const ShellSyscall = struct {
         if (bun.Environment.isWindows) {
             return .{ .result = bun.toLibUVOwnedFD(fd) };
         }
-        return fd;
+        return .{ .result = fd };
     }
 
     pub fn open(file_path: [:0]const u8, flags: bun.Mode, perm: bun.Mode) Maybe(bun.FileDescriptor) {
@@ -8377,7 +8376,7 @@ const ShellSyscall = struct {
         if (bun.Environment.isWindows) {
             return .{ .result = bun.toLibUVOwnedFD(fd) };
         }
-        return fd;
+        return .{ .result = fd };
     }
 
     pub fn unlinkatWithFlags(dirfd: bun.FileDescriptor, to: [:0]const u8, flags: c_uint) Maybe(void) {
