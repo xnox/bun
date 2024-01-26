@@ -5087,6 +5087,22 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     }
 
                     pub fn run(this: *@This()) void {
+                        if (bun.Environment.isWindows) {
+                            const stat = switch (ShellSyscall.statat(this.cwd, this.path)) {
+                                .result => |stat| stat,
+                                .err => |e| {
+                                    this.err = e;
+                                    return;
+                                },
+                            };
+
+                            if (!stat.isDir()) {
+                                this.result_kind = .file;
+                                this.addEntry(this.path);
+                            }
+                            return;
+                        }
+
                         const fd = switch (ShellSyscall.openat(this.cwd, this.path, os.O.RDONLY | os.O.DIRECTORY, 0)) {
                             .err => |e| {
                                 switch (e.getErrno()) {
@@ -8348,6 +8364,35 @@ inline fn fastMod(val: anytype, comptime rhs: comptime_int) @TypeOf(val) {
 /// Shell modifications for syscalls.
 /// Any function that returns a file descriptor will return a uv file descriptor
 const ShellSyscall = struct {
+    fn getPath(dirfd: bun.FileDescriptor, to: [:0]const u8, buf: *[bun.MAX_PATH_BYTES]u8) Maybe([:0]const u8) {
+        if (ResolvePath.Platform.isAbsolute(.windows, to[0..to.len])) return .{ .result = to };
+
+        const dirpath = switch (Syscall.getFdPath(dirfd, buf)) {
+            .result => |path| path,
+            .err => |e| return .{ .err = e.withFd(dirfd) },
+        };
+
+        const parts: []const []const u8 = &.{
+            dirpath[0..],
+            to[0..],
+        };
+        const joined = ResolvePath.joinZ(parts, .auto);
+        return .{ .result = joined };
+    }
+
+    fn statat(dir: bun.FileDescriptor, path_: [:0]const u8) Maybe(bun.Stat) {
+        var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+        const path = switch (getPath(dir, path_, &buf)) {
+            .err => |e| return .{ .err = e },
+            .result => |p| p,
+        };
+
+        return switch (Syscall.stat(path)) {
+            .err => |e| .{ .err = e.clone(bun.default_allocator) catch bun.outOfMemory() },
+            .result => |s| .{ .result = s },
+        };
+    }
+
     fn openat(dir: bun.FileDescriptor, path: [:0]const u8, flags: bun.Mode, perm: bun.Mode) Maybe(bun.FileDescriptor) {
         if (bun.Environment.isWindows) {
             if (flags & os.O.DIRECTORY != 0) {

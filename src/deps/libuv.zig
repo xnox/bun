@@ -1873,6 +1873,14 @@ pub const uv_stat_t = extern struct {
     pub fn birthtime(self: @This()) uv_timespec_t {
         return self.birthtim;
     }
+
+    const S = struct {
+        const IFMT = 0o170000;
+        const IFDIR = 0o040000;
+    };
+    pub fn isDir(self: @This()) bool {
+        return (self.mode & S.IFMT) == S.IFDIR;
+    }
 };
 pub const uv_fs_poll_cb = ?*const fn ([*c]uv_fs_poll_t, c_int, [*c]const uv_stat_t, [*c]const uv_stat_t) callconv(.C) void;
 pub const UV_LEAVE_GROUP: c_int = 0;
