@@ -6783,6 +6783,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         task_manager: *ParentRmTask,
                         parent_task: ?*DirTask,
                         path: [:0]const u8,
+                        is_absolute: bool = false,
                         subtask_count: std.atomic.Value(usize),
                         need_to_wait: bool = false,
                         kind_hint: EntryKindHint,
@@ -6833,7 +6834,8 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             defer this.postRun();
 
                             print("DirTask: {s}", .{this.path});
-                            switch (this.task_manager.removeEntry(this, ResolvePath.Platform.auto.isAbsolute(this.path[0..this.path.len]))) {
+                            this.is_absolute = ResolvePath.Platform.auto.isAbsolute(this.path[0..this.path.len]);
+                            switch (this.task_manager.removeEntry(this, this.is_absolute)) {
                                 .err => |err| {
                                     print("DirTask({x}) failed: {s}: {s}", .{ @intFromPtr(this), @tagName(err.getErrno()), err.path });
                                     this.task_manager.err_mutex.lock();
@@ -6889,7 +6891,10 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                         pub fn deleteAfterWaitingForChildren(this: *DirTask) void {
                             this.need_to_wait = false;
-                            defer this.postRun();
+                            var do_post_run = true;
+                            defer {
+                                if (do_post_run) this.postRun();
+                            }
                             if (this.task_manager.error_signal.load(.SeqCst)) {
                                 return;
                             }
@@ -6905,7 +6910,11 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                         bun.default_allocator.free(e.path);
                                     }
                                 },
-                                .result => {},
+                                .result => |deleted| {
+                                    if (!deleted) {
+                                        do_post_run = false;
+                                    }
+                                },
                             }
                         }
 
@@ -7021,9 +7030,13 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     }
 
                     pub fn removeEntry(this: *ShellRmTask, dir_task: *DirTask, is_absolute: bool) Maybe(void) {
+                        var remove_child_vtable = RemoveFileVTable{
+                            .task = this,
+                            .child_of_dir = false,
+                        };
                         var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
                         switch (dir_task.kind_hint) {
-                            .idk, .file => return this.removeEntryFile(dir_task, dir_task.path, is_absolute, &buf, false),
+                            .idk, .file => return this.removeEntryFile(dir_task, dir_task.path, is_absolute, &buf, &remove_child_vtable),
                             .dir => return this.removeEntryDir(dir_task, is_absolute, &buf),
                         }
                     }
@@ -7033,21 +7046,33 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         const dirfd = this.cwd;
 
                         // If `-d` is specified without `-r` then we can just use `rmdirat`
-                        if (this.opts.remove_empty_dirs and !this.opts.recursive) {
-                            switch (Syscall.rmdirat(dirfd, path)) {
-                                .result => return Maybe(void).success,
-                                .err => |e| {
-                                    switch (e.getErrno()) {
-                                        bun.C.E.NOENT => {
-                                            if (this.opts.force) return this.verboseDeleted(dir_task, path);
-                                            return .{ .err = this.errorWithPath(e, path) };
-                                        },
-                                        bun.C.E.NOTDIR => {
-                                            return this.removeEntryFile(dir_task, dir_task.path, is_absolute, buf, false);
-                                        },
-                                        else => return .{ .err = this.errorWithPath(e, path) },
-                                    }
-                                },
+                        if (this.opts.remove_empty_dirs and !this.opts.recursive) out_to_iter: {
+                            var delete_state = RemoveFileParent{
+                                .task = this,
+                                .treat_as_dir = true,
+                                .allow_enqueue = false,
+                            };
+                            while (delete_state.treat_as_dir) {
+                                switch (ShellSyscall.rmdirat(dirfd, path)) {
+                                    .result => return Maybe(void).success,
+                                    .err => |e| {
+                                        switch (e.getErrno()) {
+                                            bun.C.E.NOENT => {
+                                                if (this.opts.force) return this.verboseDeleted(dir_task, path);
+                                                return .{ .err = this.errorWithPath(e, path) };
+                                            },
+                                            bun.C.E.NOTDIR => {
+                                                delete_state.treat_as_dir = false;
+                                                if (this.removeEntryFile(dir_task, dir_task.path, is_absolute, buf, &delete_state).asErr()) |err| {
+                                                    return .{ .err = this.errorWithPath(err, path) };
+                                                }
+                                                if (!delete_state.treat_as_dir) return Maybe(void).success;
+                                                if (delete_state.treat_as_dir) break :out_to_iter;
+                                            },
+                                            else => return .{ .err = this.errorWithPath(e, path) },
+                                        }
+                                    },
+                                }
                             }
                         }
 
@@ -7065,7 +7090,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                         return .{ .err = this.errorWithPath(e, path) };
                                     },
                                     bun.C.E.NOTDIR => {
-                                        return this.removeEntryFile(dir_task, dir_task.path, is_absolute, buf, false);
+                                        return this.removeEntryFile(dir_task, dir_task.path, is_absolute, buf, &DummyRemoveFile.dummy);
                                     },
                                     else => return .{ .err = this.errorWithPath(e, path) },
                                 }
@@ -7081,6 +7106,11 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                         var iterator = DirIterator.iterate(fd.asDir(), .u8);
                         var entry = iterator.next();
+
+                        var remove_child_vtable = RemoveFileVTable{
+                            .task = this,
+                            .child_of_dir = true,
+                        };
 
                         var i: usize = 0;
                         while (switch (entry) {
@@ -7111,7 +7141,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                         .result => |p| p,
                                     };
 
-                                    switch (this.removeEntryFile(dir_task, file_path, is_absolute, buf, true)) {
+                                    switch (this.removeEntryFile(dir_task, file_path, is_absolute, buf, &remove_child_vtable)) {
                                         .err => |e| return .{ .err = this.errorWithPath(e, current.name.sliceAssumeZ()) },
                                         .result => {},
                                     }
@@ -7154,22 +7184,78 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         }
                     }
 
-                    fn removeEntryDirAfterChildren(this: *ShellRmTask, dir_task: *DirTask) Maybe(void) {
+                    const DummyRemoveFile = struct {
+                        var dummy: @This() = std.mem.zeroes(@This());
+
+                        pub fn onIsDir(this: *@This(), parent_dir_task: *DirTask, path: [:0]const u8, is_absolute: bool, buf: *[bun.MAX_PATH_BYTES]u8) Maybe(void) {
+                            _ = this; // autofix
+                            _ = parent_dir_task; // autofix
+                            _ = path; // autofix
+                            _ = is_absolute; // autofix
+                            _ = buf; // autofix
+
+                            return Maybe(void).success;
+                        }
+
+                        pub fn onDirNotEmpty(this: *@This(), parent_dir_task: *DirTask, path: [:0]const u8, is_absolute: bool, buf: *[bun.MAX_PATH_BYTES]u8) Maybe(void) {
+                            _ = this; // autofix
+                            _ = parent_dir_task; // autofix
+                            _ = path; // autofix
+                            _ = is_absolute; // autofix
+                            _ = buf; // autofix
+
+                            return Maybe(void).success;
+                        }
+                    };
+
+                    const RemoveFileParent = struct {
+                        task: *ShellRmTask,
+                        treat_as_dir: bool,
+                        allow_enqueue: bool = true,
+                        enqueued: bool = false,
+
+                        pub fn onIsDir(this: *@This(), parent_dir_task: *DirTask, path: [:0]const u8, is_absolute: bool, buf: *[bun.MAX_PATH_BYTES]u8) Maybe(void) {
+                            _ = parent_dir_task; // autofix
+                            _ = path; // autofix
+                            _ = is_absolute; // autofix
+                            _ = buf; // autofix
+
+                            this.treat_as_dir = true;
+                            return Maybe(void).success;
+                        }
+
+                        pub fn onDirNotEmpty(this: *@This(), parent_dir_task: *DirTask, path: [:0]const u8, is_absolute: bool, buf: *[bun.MAX_PATH_BYTES]u8) Maybe(void) {
+                            _ = is_absolute; // autofix
+                            _ = buf; // autofix
+
+                            this.treat_as_dir = true;
+                            if (this.allow_enqueue) {
+                                this.task.enqueueNoJoin(parent_dir_task, path, .dir);
+                                this.enqueued = true;
+                            }
+                            return Maybe(void).success;
+                        }
+                    };
+
+                    fn removeEntryDirAfterChildren(this: *ShellRmTask, dir_task: *DirTask) Maybe(bool) {
                         const dirfd = bun.toFD(this.cwd);
-                        var treat_as_dir = true;
+                        var state = RemoveFileParent{
+                            .task = this,
+                            .treat_as_dir = true,
+                        };
                         const fd: bun.FileDescriptor = handle_entry: while (true) {
-                            if (treat_as_dir) {
+                            if (state.treat_as_dir) {
                                 switch (ShellSyscall.openat(dirfd, dir_task.path, os.O.DIRECTORY | os.O.RDONLY, 0)) {
                                     .err => |e| switch (e.getErrno()) {
                                         bun.C.E.NOENT => {
                                             if (this.opts.force) {
                                                 if (this.verboseDeleted(dir_task, dir_task.path).asErr()) |e2| return .{ .err = e2 };
-                                                return Maybe(void).success;
+                                                return .{ .result = true };
                                             }
                                             return .{ .err = e };
                                         },
                                         bun.C.E.NOTDIR => {
-                                            treat_as_dir = false;
+                                            state.treat_as_dir = false;
                                             continue;
                                         },
                                         else => return .{ .err = e },
@@ -7177,27 +7263,13 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                     .result => |fd| break :handle_entry fd,
                                 }
                             } else {
-                                if (ShellSyscall.unlinkatWithFlags(dirfd, dir_task.path, 0).asErr()) |e| {
-                                    switch (e.getErrno()) {
-                                        bun.C.E.NOENT => {
-                                            if (this.opts.force) {
-                                                if (this.verboseDeleted(dir_task, dir_task.path).asErr()) |e2| return .{ .err = e2 };
-                                                return Maybe(void).success;
-                                            }
-                                            return .{ .err = e };
-                                        },
-                                        bun.C.E.ISDIR => {
-                                            treat_as_dir = true;
-                                            continue;
-                                        },
-                                        bun.C.E.PERM => {
-                                            // TODO should check if dir
-                                            return .{ .err = e };
-                                        },
-                                        else => return .{ .err = e },
-                                    }
+                                var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+                                if (this.removeEntryFile(dir_task, dir_task.path, dir_task.is_absolute, &buf, &state).asErr()) |e| {
+                                    return .{ .err = e };
                                 }
-                                return Maybe(void).success;
+                                if (state.enqueued) return .{ .result = false };
+                                if (state.treat_as_dir) continue;
+                                return .{ .result = true };
                             }
                         };
 
@@ -7211,14 +7283,14 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                     .err => |e| return .{ .err = e },
                                     else => {},
                                 }
-                                return Maybe(void).success;
+                                return .{ .result = true };
                             },
                             .err => |e| {
                                 switch (e.getErrno()) {
                                     bun.C.E.NOENT => {
                                         if (this.opts.force) {
                                             if (this.verboseDeleted(dir_task, dir_task.path).asErr()) |e2| return .{ .err = e2 };
-                                            return Maybe(void).success;
+                                            return .{ .result = true };
                                         }
                                         return .{ .err = e };
                                     },
@@ -7228,14 +7300,44 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         }
                     }
 
-                    fn removeEntryFile(
-                        this: *ShellRmTask,
-                        parent_dir_task: *DirTask,
-                        path: [:0]const u8,
-                        is_absolute: bool,
-                        buf: *[bun.MAX_PATH_BYTES]u8,
-                        comptime is_file_in_dir: bool,
-                    ) Maybe(void) {
+                    const RemoveFileVTable = struct {
+                        task: *ShellRmTask,
+                        child_of_dir: bool,
+
+                        pub fn onIsDir(this: *@This(), parent_dir_task: *DirTask, path: [:0]const u8, is_absolute: bool, buf: *[bun.MAX_PATH_BYTES]u8) Maybe(void) {
+                            if (this.child_of_dir) {
+                                this.task.enqueueNoJoin(parent_dir_task, path, .dir);
+                                return Maybe(void).success;
+                            }
+                            return this.task.removeEntryDir(parent_dir_task, is_absolute, buf);
+                        }
+
+                        pub fn onDirNotEmpty(this: *@This(), parent_dir_task: *DirTask, path: [:0]const u8, is_absolute: bool, buf: *[bun.MAX_PATH_BYTES]u8) Maybe(void) {
+                            _ = is_absolute; // autofix
+                            _ = buf; // autofix
+
+                            this.task.enqueueNoJoin(parent_dir_task, path, .dir);
+                            return Maybe(void).success;
+                        }
+                    };
+
+                    fn removeEntryFile(this: *ShellRmTask, parent_dir_task: *DirTask, path: [:0]const u8, is_absolute: bool, buf: *[bun.MAX_PATH_BYTES]u8, vtable: anytype) Maybe(void) {
+                        const VTable = std.meta.Child(@TypeOf(vtable));
+                        const Handler = struct {
+                            pub fn onIsDir(vtable_: anytype, parent_dir_task_: *DirTask, path_: [:0]const u8, is_absolute_: bool, buf_: *[bun.MAX_PATH_BYTES]u8) Maybe(void) {
+                                if (@hasDecl(VTable, "onIsDir")) {
+                                    return VTable.onIsDir(vtable_, parent_dir_task_, path_, is_absolute_, buf_);
+                                }
+                                return Maybe(void).success;
+                            }
+
+                            pub fn onDirNotEmpty(vtable_: anytype, parent_dir_task_: *DirTask, path_: [:0]const u8, is_absolute_: bool, buf_: *[bun.MAX_PATH_BYTES]u8) Maybe(void) {
+                                if (@hasDecl(VTable, "onDirNotEmpty")) {
+                                    return VTable.onDirNotEmpty(vtable_, parent_dir_task_, path_, is_absolute_, buf_);
+                                }
+                                return Maybe(void).success;
+                            }
+                        };
                         const dirfd = bun.toFD(this.cwd);
                         switch (ShellSyscall.unlinkatWithFlags(dirfd, path, 0)) {
                             .result => return this.verboseDeleted(parent_dir_task, path),
@@ -7248,11 +7350,12 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                         return .{ .err = this.errorWithPath(e, path) };
                                     },
                                     bun.C.E.ISDIR => {
-                                        if (comptime is_file_in_dir) {
-                                            this.enqueueNoJoin(parent_dir_task, path, .dir);
-                                            return Maybe(void).success;
-                                        }
-                                        return this.removeEntryDir(parent_dir_task, is_absolute, buf);
+                                        return Handler.onIsDir(vtable, parent_dir_task, path, is_absolute, buf);
+                                        // if (comptime is_file_in_dir) {
+                                        //     this.enqueueNoJoin(parent_dir_task, path, .dir);
+                                        //     return Maybe(void).success;
+                                        // }
+                                        // return this.removeEntryDir(parent_dir_task, is_absolute, buf);
                                     },
                                     // This might happen if the file is actually a directory
                                     bun.C.E.PERM => {
@@ -7271,8 +7374,9 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                                             return switch (e2.getErrno()) {
                                                                 // not empty, process directory as we would normally
                                                                 bun.C.E.NOTEMPTY => {
-                                                                    this.enqueueNoJoin(parent_dir_task, path, .dir);
-                                                                    return Maybe(void).success;
+                                                                    // this.enqueueNoJoin(parent_dir_task, path, .dir);
+                                                                    // return Maybe(void).success;
+                                                                    return Handler.onDirNotEmpty(vtable, parent_dir_task, path, is_absolute, buf);
                                                                 },
                                                                 // actually a file, the error is a permissions error
                                                                 bun.C.E.NOTDIR => .{ .err = this.errorWithPath(e, path) },
@@ -7283,11 +7387,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                                 }
 
                                                 // We don't know if it was an actual permissions error or it was a directory so we need to try to delete it as a directory
-                                                if (comptime is_file_in_dir) {
-                                                    this.enqueueNoJoin(parent_dir_task, path, .dir);
-                                                    return Maybe(void).success;
-                                                }
-                                                return this.removeEntryDir(parent_dir_task, is_absolute, buf);
+                                                return Handler.onIsDir(vtable, parent_dir_task, path, is_absolute, buf);
                                             },
                                             else => {},
                                         }
@@ -8300,6 +8400,43 @@ const ShellSyscall = struct {
             };
         }
         return Syscall.unlinkatWithFlags(dirfd, to, flags);
+    }
+
+    pub fn rmdirat(dirfd: anytype, to: anytype) Maybe(void) {
+        if (bun.Environment.isWindows) {
+            const path: []const u8 = brk: {
+                switch (@TypeOf(dirfd)) {
+                    bun.FileDescriptor => {
+                        var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+                        const dirpath = switch (Syscall.getFdPath(dirfd, &buf)) {
+                            .result => |path| path,
+                            .err => |e| return .{ .err = e.withFd(dirfd) },
+                        };
+                        const parts: []const []const u8 = &.{ dirpath[0..dirpath.len], to[0..to.len] };
+                        break :brk bun.path.joinZ(parts, .auto);
+                    },
+                    []const u8, [:0]const u8 => {
+                        const parts: []const []const u8 = &.{ dirfd[0..dirfd.len], to[0..to.len] };
+                        break :brk bun.path.joinZ(parts, .auto);
+                    },
+                    else => {
+                        @compileError("Bad type for `dirfd`: " ++ @typeName(dirfd));
+                    },
+                }
+            };
+            var wide_buf: [windows.PATH_MAX_WIDE]u16 = undefined;
+            const wpath = bun.strings.toWPath(&wide_buf, path);
+            while (true) {
+                if (windows.RemoveDirectoryW(wpath) != 0) {
+                    const errno = Syscall.getErrno(420);
+                    if (errno == .INTR) continue;
+                    return .{ .err = Syscall.Error.fromCode(errno, .rmdir) };
+                }
+                return Maybe(void).success;
+            }
+        }
+
+        return Syscall.rmdirat(dirfd, to);
     }
 };
 
