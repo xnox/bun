@@ -7272,24 +7272,29 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             .task = this,
                             .treat_as_dir = true,
                         };
-                        const fd: bun.FileDescriptor = handle_entry: while (true) {
+                        while (true) {
                             if (state.treat_as_dir) {
-                                switch (ShellSyscall.openat(dirfd, dir_task.path, os.O.DIRECTORY | os.O.RDONLY, 0)) {
-                                    .err => |e| switch (e.getErrno()) {
-                                        bun.C.E.NOENT => {
-                                            if (this.opts.force) {
-                                                if (this.verboseDeleted(dir_task, dir_task.path).asErr()) |e2| return .{ .err = e2 };
-                                                return .{ .result = true };
-                                            }
-                                            return .{ .err = e };
-                                        },
-                                        bun.C.E.NOTDIR => {
-                                            state.treat_as_dir = false;
-                                            continue;
-                                        },
-                                        else => return .{ .err = e },
+                                switch (ShellSyscall.rmdirat(dirfd, dir_task.path)) {
+                                    .result => {
+                                        _ = this.verboseDeleted(dir_task, dir_task.path);
+                                        return .{ .result = true };
                                     },
-                                    .result => |fd| break :handle_entry fd,
+                                    .err => |e| {
+                                        switch (e.getErrno()) {
+                                            bun.C.E.NOENT => {
+                                                if (this.opts.force) {
+                                                    _ = this.verboseDeleted(dir_task, dir_task.path);
+                                                    return .{ .result = true };
+                                                }
+                                                return .{ .err = this.errorWithPath(e, dir_task.path) };
+                                            },
+                                            bun.C.E.NOTDIR => {
+                                                state.treat_as_dir = false;
+                                                continue;
+                                            },
+                                            else => return .{ .err = this.errorWithPath(e, dir_task.path) },
+                                        }
+                                    },
                                 }
                             } else {
                                 var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
@@ -7300,41 +7305,6 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                 if (state.treat_as_dir) continue;
                                 return .{ .result = true };
                             }
-                        };
-
-                        var close_fd = true;
-                        defer {
-                            if (close_fd) {
-                                _ = Syscall.close(fd);
-                            }
-                        }
-
-                        var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
-                        if (bun.Environment.isWindows) {
-                            close_fd = false;
-                            _ = Syscall.close(fd);
-                        }
-
-                        switch (ShellSyscall.unlinkatWithFlags(dirfd, dir_task.path, std.os.AT.REMOVEDIR, &buf)) {
-                            .result => {
-                                switch (this.verboseDeleted(dir_task, dir_task.path)) {
-                                    .err => |e| return .{ .err = e },
-                                    else => {},
-                                }
-                                return .{ .result = true };
-                            },
-                            .err => |e| {
-                                switch (e.getErrno()) {
-                                    bun.C.E.NOENT => {
-                                        if (this.opts.force) {
-                                            if (this.verboseDeleted(dir_task, dir_task.path).asErr()) |e2| return .{ .err = e2 };
-                                            return .{ .result = true };
-                                        }
-                                        return .{ .err = e };
-                                    },
-                                    else => return .{ .err = e },
-                                }
-                            },
                         }
                     }
 
