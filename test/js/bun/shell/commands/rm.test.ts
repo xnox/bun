@@ -8,12 +8,12 @@ import { tempDirWithFiles } from "harness";
 import { describe, test, afterAll, beforeAll, expect } from "bun:test";
 import { $ } from "bun";
 import path from "path";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readdirSync } from "node:fs";
 import { ShellOutput } from "bun";
 import { TestBuilder, sortedShellOutput } from "../util";
 
-const fileExists = async (path: string): Promise<boolean> =>
-  $`ls -d ${path}`.then(o => o.stdout.toString() == `${path}\n`);
+const fileExists = async (...paths: string[]): Promise<boolean> =>
+  $`ls -d ${path.join(...paths)}`.then(o => o.stdout.toString() == `${path.join(...paths)}\n`);
 
 describe("bunshell rm", () => {
   test("force", async () => {
@@ -31,11 +31,11 @@ describe("bunshell rm", () => {
     }
 
     {
-      expect(await fileExists(`${tempdir}/existent.txt`)).toBeTrue();
+      expect(await fileExists(tempdir, `existent.txt`)).toBeTrue();
       const { stdout, exitCode } = await $`rm -v ${tempdir}/existent.txt`;
       expect(stdout.toString()).toEqual(`${tempdir}/existent.txt\n`);
       expect(exitCode).toBe(0);
-      expect(await fileExists(`${tempdir}/existent.txt`)).toBeFalse();
+      expect(await fileExists(tempdir, `existent.txt`)).toBeFalse();
     }
   });
 
@@ -48,15 +48,22 @@ describe("bunshell rm", () => {
 
     // test on a file
     {
-      expect(await fileExists(`${tempdir}/existent.txt`)).toBeTrue();
+      expect(await fileExists(tempdir, `existent.txt`)).toBeTrue();
       const { stdout, stderr, exitCode } = await $`rm -rv ${tempdir}/existent.txt`;
       expect(stderr.length).toBe(0);
       expect(stdout.toString()).toEqual(`${tempdir}/existent.txt\n`);
       expect(exitCode).toBe(0);
-      expect(await fileExists(`${tempdir}/existent.txt`)).toBeFalse();
+      expect(await fileExists(tempdir, `existent.txt`)).toBeFalse();
     }
 
-    // test on a directory
+    /**
+     * test on a directory
+     *
+     * tempdir looks like this:
+     * {
+     *   folder: { sub: { file.txt: "test" } }
+     * }
+     */
     {
       let subDir = path.join(tempdir, "folder", "sub");
       mkdirSync(subDir, { recursive: true });
@@ -108,6 +115,10 @@ foo/
     };
 
     const tempdir = tempDirWithFiles("rmdir", files);
+    console.log("Files", readdirSync(tempdir));
+
+    const tempdirFiles = await $`ls ${tempdir}`.text();
+    console.log("Files", tempdirFiles);
 
     {
       const { stdout, stderr, exitCode } = await $`rm -d ${tempdir}/existent.txt`;
@@ -116,9 +127,11 @@ foo/
     }
 
     {
+      expect(await fileExists(`${tempdir}/sub_dir`)).toBeTrue();
       const { stdout, stderr, exitCode } = await $`rm -d ${tempdir}/sub_dir`;
       console.log(stderr.toString());
       expect(exitCode).toBe(0);
+      console.log("Files", readdirSync(tempdir));
       expect(await fileExists(`${tempdir}/sub_dir`)).toBeFalse();
     }
 
