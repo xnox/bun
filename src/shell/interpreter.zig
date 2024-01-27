@@ -5088,9 +5088,11 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                     pub fn run(this: *@This()) void {
                         if (bun.Environment.isWindows) {
+                            print("windows stat: {s}", .{this.path});
                             const stat = switch (ShellSyscall.statat(this.cwd, this.path)) {
                                 .result => |stat| stat,
                                 .err => |e| {
+                                    print("windows stat failed: {s} ({s})", .{ this.path, @tagName(e.getErrno()) });
                                     this.err = e;
                                     return;
                                 },
@@ -5099,8 +5101,8 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             if (!stat.isDir()) {
                                 this.result_kind = .file;
                                 this.addEntry(this.path);
+                                return;
                             }
-                            return;
                         }
 
                         const fd = switch (ShellSyscall.openat(this.cwd, this.path, os.O.RDONLY | os.O.DIRECTORY, 0)) {
@@ -7375,9 +7377,9 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                     // This might happen if the file is actually a directory
                                     bun.C.E.PERM => {
                                         switch (builtin.os.tag) {
-                                            // non-Linux POSIX systems return EPERM when trying to delete a directory, so
+                                            // non-Linux POSIX systems and Windows return EPERM when trying to delete a directory, so
                                             // we need to handle that case specifically and translate the error
-                                            .macos, .ios, .freebsd, .netbsd, .dragonfly, .openbsd, .solaris, .illumos => {
+                                            .macos, .ios, .freebsd, .netbsd, .dragonfly, .openbsd, .solaris, .illumos, .windows => {
                                                 // If we are allowed to delete directories then we can call `unlink`.
                                                 // If `path` points to a directory, then it is deleted (if empty) or we handle it as a directory
                                                 // If it's actually a file, we get an error so we don't need to call `stat` to check that.
