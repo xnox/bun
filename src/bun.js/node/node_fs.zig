@@ -4330,6 +4330,22 @@ pub const NodeFS = struct {
     }
 
     pub fn mkdirRecursiveOSPath(this: *NodeFS, path: bun.OSPathSliceZ, mode: Mode, comptime return_path: bool) Maybe(Return.Mkdir) {
+        const DummyVTable = struct {
+            pub fn onCreateDir(_: @This(), _: bun.OSPathSliceZ) void {
+                return;
+            }
+        };
+        return mkdirRecursiveOSPathImpl(this, DummyVTable, .{}, path, mode, return_path);
+    }
+
+    pub fn mkdirRecursiveOSPathImpl(this: *NodeFS, comptime Ctx: type, ctx: Ctx, path: bun.OSPathSliceZ, mode: Mode, comptime return_path: bool) Maybe(Return.Mkdir) {
+        const VTable = struct {
+            pub fn onCreateDir(c: Ctx, dirpath: bun.OSPathSliceZ) void {
+                c.onCreateDir(dirpath);
+                return;
+            }
+        };
+
         const Char = bun.OSPathChar;
         const len = @as(u16, @truncate(path.len));
 
@@ -4349,6 +4365,7 @@ pub const NodeFS = struct {
                 }
             },
             .result => {
+                VTable.onCreateDir(ctx, path);
                 if (!return_path) {
                     return .{ .result = .{ .none = {} } };
                 }
@@ -4390,6 +4407,7 @@ pub const NodeFS = struct {
                         }
                     },
                     .result => {
+                        VTable.onCreateDir(ctx, parent);
                         // We found a parent that worked
                         working_mem[i] = std.fs.path.sep;
                         break;
@@ -4420,6 +4438,7 @@ pub const NodeFS = struct {
                     },
 
                     .result => {
+                        VTable.onCreateDir(ctx, parent);
                         working_mem[i] = std.fs.path.sep;
                     },
                 }
@@ -4445,6 +4464,7 @@ pub const NodeFS = struct {
             .result => {},
         }
 
+        VTable.onCreateDir(ctx, working_mem[0..len :0]);
         if (!return_path) {
             return .{ .result = .{ .none = {} } };
         }

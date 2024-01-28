@@ -349,6 +349,8 @@ const Lchown = JSC.Node.Async.lchown;
 const Unlink = JSC.Node.Async.unlink;
 const WaitPidResultTask = JSC.Subprocess.WaiterThread.WaitPidResultTask;
 const ShellGlobTask = bun.shell.interpret.Interpreter.Expansion.ShellGlobTask;
+const ShellMkdirTask = bun.shell.Interpreter.Builtin.Mkdir.ShellMkdirTask;
+const ShellMkdirTaskMini = bun.shell.InterpreterMini.Builtin.Mkdir.ShellMkdirTask;
 const ShellRmTask = bun.shell.Interpreter.Builtin.Rm.ShellRmTask;
 const ShellRmDirTask = bun.shell.Interpreter.Builtin.Rm.ShellRmTask.DirTask;
 const ShellRmDirTaskMini = bun.shell.InterpreterMini.Builtin.Rm.ShellRmTask.DirTask;
@@ -419,6 +421,7 @@ pub const Task = TaggedPointerUnion(.{
     // These need to be referenced like this so they both don't become `WaitPidResultTask`
     JSC.Subprocess.WaiterThread.WaitPidResultTask,
     ShellSubprocessResultTask,
+    ShellMkdirTask,
     ShellGlobTask,
     ShellRmTask,
     ShellRmDirTask,
@@ -724,6 +727,10 @@ pub const EventLoop = struct {
         while (@field(this, queue_name).readItem()) |task| {
             defer counter += 1;
             switch (task.tag()) {
+                @field(Task.Tag, typeBaseName(@typeName(ShellMkdirTask))) => {
+                    var shell_task: *ShellMkdirTask = task.get(ShellMkdirTask).?;
+                    shell_task.runFromMainThread();
+                },
                 @field(Task.Tag, typeBaseName(@typeName(ShellLsTask))) => {
                     var shell_ls_task: *ShellLsTask = task.get(ShellLsTask).?;
                     shell_ls_task.runFromMainThread();

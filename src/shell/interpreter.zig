@@ -49,6 +49,7 @@ const shell = @import("./shell.zig");
 const Token = shell.Token;
 const ShellError = shell.ShellError;
 const ast = shell.AST;
+const AtomicVal = std.atomic.Value;
 
 const GlobWalker = @import("../glob.zig").GlobWalker_(null, true);
 
@@ -3571,6 +3572,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             cwd: bun.FileDescriptor,
 
             impl: union(Kind) {
+                mkdir: Mkdir,
                 @"export": Export,
                 cd: Cd,
                 echo: Echo,
@@ -3584,6 +3586,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             const Result = @import("../result.zig").Result;
 
             pub const Kind = enum {
+                mkdir,
                 @"export",
                 cd,
                 echo,
@@ -3599,6 +3602,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                 pub fn usageString(this: Kind) []const u8 {
                     return switch (this) {
+                        .mkdir => "usage: mkdir [-pv] [-m mode] directory_name ...\n",
                         .@"export" => "",
                         .cd => "",
                         .echo => "",
@@ -3611,16 +3615,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 }
 
                 pub fn asString(this: Kind) []const u8 {
-                    return switch (this) {
-                        .@"export" => "export",
-                        .cd => "cd",
-                        .echo => "echo",
-                        .pwd => "pwd",
-                        .which => "which",
-                        .rm => "rm",
-                        .mv => "mv",
-                        .ls => "ls",
-                    };
+                    return @tagName(this);
                 }
 
                 pub fn fromStr(str: []const u8) ?Builtin.Kind {
@@ -3732,6 +3727,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
             pub inline fn callImpl(this: *Builtin, comptime Ret: type, comptime field: []const u8, args_: anytype) Ret {
                 return switch (this.kind) {
+                    .mkdir => this.callImplWithType(Mkdir, Ret, "mkdir", field, args_),
                     .@"export" => this.callImplWithType(Export, Ret, "export", field, args_),
                     .echo => this.callImplWithType(Echo, Ret, "echo", field, args_),
                     .cd => this.callImplWithType(Cd, Ret, "cd", field, args_),
@@ -3815,6 +3811,11 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 };
 
                 switch (kind) {
+                    .mkdir => {
+                        cmd.exec.bltn.impl = .{
+                            .mkdir = Mkdir{ .bltn = &cmd.exec.bltn },
+                        };
+                    },
                     .@"export" => {
                         cmd.exec.bltn.impl = .{
                             .@"export" = Export{ .bltn = &cmd.exec.bltn },
@@ -4087,14 +4088,21 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             }
 
             /// Error messages formatted to match bash
-            fn taskErrorToString(this: *Builtin, comptime kind: Kind, err: Syscall.Error) []const u8 {
-                return switch (err.getErrno()) {
-                    bun.C.E.NOENT => this.fmtErrorArena(kind, "{s}: No such file or directory\n", .{err.path}),
-                    bun.C.E.NAMETOOLONG => this.fmtErrorArena(kind, "{s}: File name too long\n", .{err.path}),
-                    bun.C.E.ISDIR => this.fmtErrorArena(kind, "{s}: is a directory\n", .{err.path}),
-                    bun.C.E.NOTEMPTY => this.fmtErrorArena(kind, "{s}: Directory not empty\n", .{err.path}),
-                    else => this.fmtErrorArena(kind, "{s}\n", .{err.toSystemError().message.byteSlice()}),
-                };
+            fn taskErrorToString(this: *Builtin, comptime kind: Kind, err: anytype) []const u8 {
+                switch (@TypeOf(err)) {
+                    Syscall.Error => return switch (err.getErrno()) {
+                        bun.C.E.NOENT => this.fmtErrorArena(kind, "{s}: No such file or directory\n", .{err.path}),
+                        bun.C.E.NAMETOOLONG => this.fmtErrorArena(kind, "{s}: File name too long\n", .{err.path}),
+                        bun.C.E.ISDIR => this.fmtErrorArena(kind, "{s}: is a directory\n", .{err.path}),
+                        bun.C.E.NOTEMPTY => this.fmtErrorArena(kind, "{s}: Directory not empty\n", .{err.path}),
+                        else => this.fmtErrorArena(kind, "{s}\n", .{err.toSystemError().message.byteSlice()}),
+                    },
+                    JSC.SystemError => {
+                        if (err.path.length() == 0) return this.fmtErrorArena(kind, "{s}\n", .{err.message.byteSlice()});
+                        return this.fmtErrorArena(kind, "{s}: {s}\n", .{ err.message.byteSlice(), err.path });
+                    },
+                    else => @compileError("Bad type: " ++ @typeName(err)),
+                }
             }
 
             pub fn ioAllClosed(this: *Builtin) bool {
@@ -4340,6 +4348,423 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     log("({s}) deinit", .{@tagName(.echo)});
                     _ = this;
                 }
+            };
+
+            pub const Mkdir = struct {
+                bltn: *Builtin,
+                opts: Opts = .{},
+                state: union(enum) {
+                    idle,
+                    exec: struct {
+                        started: bool = false,
+                        tasks_count: usize = 0,
+                        tasks_done: usize = 0,
+                        output_queue: std.DoublyLinkedList(BlockingOutput) = .{},
+                        started_output_queue: bool = false,
+                        args: []const [*:0]const u8,
+                        err: ?JSC.SystemError = null,
+                    },
+                    waiting_write_err: BufferedWriter,
+                    done,
+                } = .idle,
+
+                const BlockingOutput = struct {
+                    writer: BufferedWriter,
+                    arr: std.ArrayList(u8),
+
+                    pub fn deinit(this: *BlockingOutput) void {
+                        this.arr.deinit();
+                    }
+                };
+
+                pub fn onBufferedWriterDone(this: *Mkdir, e: ?Syscall.Error) void {
+                    _ = e; // autofix
+
+                    if (this.state == .waiting_write_err) {
+                        // if (e) |err| return this.bltn.done(1);
+                        return this.bltn.done(1);
+                    }
+
+                    var queue = &this.state.exec.output_queue;
+                    var first = queue.popFirst().?;
+                    defer {
+                        first.data.deinit();
+                        bun.default_allocator.destroy(first);
+                    }
+                    if (first.next) |next_writer| {
+                        next_writer.data.writer.writeIfPossible(false);
+                        return;
+                    }
+
+                    this.next();
+                }
+
+                pub fn writeFailingError(this: *Mkdir, buf: []const u8, exit_code: ExitCode) Maybe(void) {
+                    if (this.bltn.stderr.needsIO()) {
+                        const fd = this.bltn.stderr.expectFd();
+                        const bw = switch (BufferedWriter.init(fd, buf, BufferedWriter.ParentPtr.init(this), this.bltn.stdBufferedBytelist(.stderr))) {
+                            .result => |bw| bw,
+                            .err => |e| return .{ .err = e.withFd(fd) },
+                        };
+                        this.state = .{ .waiting_write_err = bw };
+                        this.state.waiting_write_err.writeIfPossible(false);
+                        return Maybe(void).success;
+                    }
+
+                    if (this.bltn.writeNoIO(.stderr, buf).asErr()) |e| {
+                        return .{ .err = e };
+                    }
+
+                    this.bltn.done(exit_code);
+                    return Maybe(void).success;
+                }
+
+                pub fn start(this: *Mkdir) Maybe(void) {
+                    const filepath_args = switch (this.opts.parse(this.bltn.argsSlice())) {
+                        .ok => |filepath_args| filepath_args,
+                        .err => |e| {
+                            const buf = switch (e) {
+                                .illegal_option => |opt_str| this.bltn.fmtErrorArena(.mkdir, "illegal option -- {s}\n", .{opt_str}),
+                                .show_usage => Builtin.Kind.mkdir.usageString(),
+                                .unsupported => |unsupported| this.bltn.fmtErrorArena(.mkdir, "unsupported option, please open a GitHub issue -- {s}\n", .{unsupported}),
+                            };
+
+                            _ = this.writeFailingError(buf, 1);
+                            return Maybe(void).success;
+                        },
+                    } orelse {
+                        _ = this.writeFailingError(Builtin.Kind.mkdir.usageString(), 1);
+                        return Maybe(void).success;
+                    };
+
+                    this.state = .{
+                        .exec = .{
+                            .args = filepath_args,
+                        },
+                    };
+
+                    _ = this.next();
+
+                    return Maybe(void).success;
+                }
+
+                pub fn next(this: *Mkdir) void {
+                    switch (this.state) {
+                        .idle => @panic("Invalid state"),
+                        .exec => {
+                            var exec = &this.state.exec;
+                            if (exec.started) {
+                                if (this.state.exec.tasks_done >= this.state.exec.tasks_count and this.state.exec.output_queue.len == 0) {
+                                    const exit_code: ExitCode = if (this.state.exec.err != null) 1 else 0;
+                                    this.state = .done;
+                                    this.bltn.done(exit_code);
+                                    return;
+                                }
+                                return;
+                            }
+
+                            exec.started = true;
+                            exec.tasks_count = exec.args.len;
+
+                            for (exec.args) |dir_to_mk_| {
+                                const dir_to_mk = dir_to_mk_[0..std.mem.len(dir_to_mk_) :0];
+                                var task = ShellMkdirTask.create(this, this.opts, dir_to_mk, this.bltn.parentCmd().base.shell.cwdZ());
+                                task.schedule();
+                            }
+                        },
+                        .waiting_write_err => return,
+                        .done => this.bltn.done(0),
+                    }
+                }
+
+                pub fn queueBlockingOutput(this: *Mkdir, bo: BlockingOutput) void {
+                    _ = this.queueBlockingOutputImpl(bo, true);
+                }
+
+                pub fn queueBlockingOutputImpl(this: *Mkdir, bo: BlockingOutput, do_run: bool) CoroutineResult {
+                    const node = bun.default_allocator.create(std.DoublyLinkedList(BlockingOutput).Node) catch bun.outOfMemory();
+                    node.* = .{
+                        .data = bo,
+                    };
+                    this.state.exec.output_queue.append(node);
+
+                    // Start it
+                    if (this.state.exec.output_queue.len == 1 and do_run) {
+                        // if (do_run and !this.state.exec.started_output_queue) {
+                        this.state.exec.started_output_queue = true;
+                        this.state.exec.output_queue.first.?.data.writer.writeIfPossible(false);
+                        return .yield;
+                    }
+                    return .cont;
+                }
+
+                fn scheduleBlockingOutput(this: *Mkdir) CoroutineResult {
+                    if (this.state.exec.output_queue.len > 0) {
+                        this.state.exec.output_queue.first.?.data.writer.writeIfPossible(false);
+                        return .yield;
+                    }
+                    return .cont;
+                }
+
+                pub fn onAsyncTaskDone(this: *Mkdir, task: *ShellMkdirTask) void {
+                    defer bun.default_allocator.destroy(task);
+                    this.state.exec.tasks_done += 1;
+                    const output = task.takeOutput();
+                    const err = task.err;
+                    var queued: bool = false;
+
+                    // Check for error, print it, but still want to print task output
+                    if (err) |e| {
+                        const error_string = this.bltn.taskErrorToString(.mkdir, e);
+                        this.state.exec.err = e;
+
+                        if (this.bltn.stderr.needsIO()) {
+                            queued = true;
+                            const blocking_output: BlockingOutput = .{
+                                .writer = switch (BufferedWriter.init(
+                                    this.bltn.stderr.expectFd(),
+                                    error_string,
+                                    BufferedWriter.ParentPtr.init(this),
+                                    this.bltn.stdBufferedBytelist(.stderr),
+                                )) {
+                                    .result => |bw| bw,
+                                    .err => |errrr| {
+                                        global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(errrr));
+                                        return;
+                                    },
+                                },
+                                .arr = std.ArrayList(u8).init(bun.default_allocator),
+                            };
+                            _ = this.queueBlockingOutputImpl(blocking_output, false);
+                            // if (!need_to_write_to_stdout_with_io) return; // yield execution
+                        } else {
+                            if (this.bltn.writeNoIO(.stderr, error_string).asErr()) |theerr| {
+                                global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(theerr));
+                            }
+                        }
+                    }
+
+                    if (this.bltn.stdout.needsIO()) {
+                        queued = true;
+                        const blocking_output: BlockingOutput = .{
+                            .writer = switch (BufferedWriter.init(
+                                this.bltn.stdout.expectFd(),
+                                output.items[0..],
+                                BufferedWriter.ParentPtr.init(this),
+                                this.bltn.stdBufferedBytelist(.stdout),
+                            )) {
+                                .result => |bw| bw,
+                                .err => |theerr| {
+                                    global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(theerr));
+                                    return;
+                                },
+                            },
+                            .arr = output,
+                        };
+                        _ = this.queueBlockingOutputImpl(blocking_output, false);
+                        // if (this.state == .done) return;
+                        // return this.next();
+                    }
+
+                    if (queued) {
+                        if (this.scheduleBlockingOutput() == .yield) return;
+                        if (this.state == .done) return;
+                        return this.next();
+                    }
+
+                    defer output.deinit();
+
+                    if (this.bltn.writeNoIO(.stdout, output.items[0..]).asErr()) |e| {
+                        global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(e));
+                        return;
+                    }
+
+                    return this.next();
+                }
+
+                pub fn deinit(this: *Mkdir) void {
+                    _ = this;
+                }
+
+                pub const ShellMkdirTask = struct {
+                    mkdir: *Mkdir,
+
+                    opts: Opts,
+                    filepath: [:0]const u8,
+                    cwd_path: [:0]const u8,
+                    created_directories: ArrayList(u8),
+
+                    err: ?JSC.SystemError = null,
+                    task: JSC.WorkPoolTask = .{ .callback = &runFromThreadPool },
+                    event_loop: EventLoopRef,
+                    concurrent_task: EventLoopTask = .{},
+
+                    const print = bun.Output.scoped(.ShellMkdirTask, false);
+
+                    fn takeOutput(this: *ShellMkdirTask) ArrayList(u8) {
+                        const out = this.created_directories;
+                        this.created_directories = ArrayList(u8).init(bun.default_allocator);
+                        return out;
+                    }
+
+                    pub fn create(
+                        mkdir: *Mkdir,
+                        opts: Opts,
+                        filepath: [:0]const u8,
+                        cwd_path: [:0]const u8,
+                    ) *ShellMkdirTask {
+                        const task = bun.default_allocator.create(ShellMkdirTask) catch bun.outOfMemory();
+                        task.* = ShellMkdirTask{
+                            .mkdir = mkdir,
+                            .opts = opts,
+                            .cwd_path = cwd_path,
+                            .filepath = filepath,
+                            .created_directories = ArrayList(u8).init(bun.default_allocator),
+                            .event_loop = event_loop_ref.get(),
+                        };
+                        return task;
+                    }
+
+                    pub fn schedule(this: *@This()) void {
+                        print("schedule", .{});
+                        WorkPool.schedule(&this.task);
+                    }
+
+                    pub fn runFromMainThread(this: *@This()) void {
+                        print("runFromJS", .{});
+                        this.mkdir.onAsyncTaskDone(this);
+                    }
+
+                    pub fn runFromMainThreadMini(this: *@This(), _: *void) void {
+                        this.runFromMainThread();
+                    }
+
+                    fn runFromThreadPool(task: *JSC.WorkPoolTask) void {
+                        var this: *ShellMkdirTask = @fieldParentPtr(ShellMkdirTask, "task", task);
+
+                        // We have to give an absolute path to our mkdir
+                        // implementation for it to work with cwd
+                        const filepath: [:0]const u8 = brk: {
+                            if (ResolvePath.Platform.auto.isAbsolute(this.filepath)) break :brk this.filepath;
+                            const parts: []const []const u8 = &.{
+                                this.cwd_path[0..],
+                                this.filepath[0..],
+                            };
+                            break :brk ResolvePath.joinZ(parts, .auto);
+                        };
+
+                        var node_fs = JSC.Node.NodeFS{};
+                        const args = JSC.Node.Arguments.Mkdir{
+                            .path = JSC.Node.PathLike{ .string = bun.PathString.init(filepath) },
+                            .recursive = this.opts.parents,
+                            .always_return_none = true,
+                        };
+
+                        switch (node_fs.mkdir(args, .callback)) {
+                            .result => {},
+                            .err => |e| {
+                                this.err = e.withPath(bun.default_allocator.dupe(u8, filepath) catch bun.outOfMemory()).toSystemError();
+                                std.mem.doNotOptimizeAway(&node_fs);
+                            },
+                        }
+
+                        if (comptime EventLoopKind == .js) {
+                            this.event_loop.enqueueTaskConcurrent(this.concurrent_task.from(this, .manual_deinit));
+                        } else {
+                            this.event_loop.enqueueTaskConcurrent(this.concurrent_task.from(this, "runFromMainThreadMini"));
+                        }
+                    }
+                };
+
+                const Opts = struct {
+                    /// -m, --mode
+                    ///
+                    /// set file mode (as in chmod), not a=rwx - umask
+                    mode: ?u32 = null,
+
+                    /// -p, --parents
+                    ///
+                    /// no error if existing, make parent directories as needed,
+                    /// with their file modes unaffected by any -m option.
+                    parents: bool = false,
+
+                    /// -v, --verbose
+                    ///
+                    /// print a message for each created directory
+                    verbose: bool = false,
+
+                    /// Custom parse error for invalid options
+                    const ParseError = union(enum) {
+                        illegal_option: []const u8,
+                        unsupported: []const u8,
+                        show_usage,
+                    };
+
+                    fn parse(this: *Opts, args: []const [*:0]const u8) Result(?[]const [*:0]const u8, Opts.ParseError) {
+                        var idx: usize = 0;
+                        if (args.len == 0) {
+                            return .{ .ok = null };
+                        }
+
+                        while (idx < args.len) : (idx += 1) {
+                            const flag = args[idx];
+                            switch (this.parseFlag(flag[0..std.mem.len(flag)])) {
+                                .done => {
+                                    const filepath_args = args[idx..];
+                                    return .{ .ok = filepath_args };
+                                },
+                                .continue_parsing => {},
+                                .illegal_option => |opt_str| return .{ .err = .{ .illegal_option = opt_str } },
+                                .unsupported => |unsp| return .{ .err = .{ .unsupported = unsp } },
+                            }
+                        }
+
+                        return .{ .err = .show_usage };
+                    }
+
+                    const ParseFlagResult = union(enum) { continue_parsing, done, illegal_option: []const u8, unsupported: []const u8 };
+
+                    fn parseFlag(this: *Opts, flag: []const u8) ParseFlagResult {
+                        if (flag.len == 0) return .done;
+                        if (flag[0] != '-') return .done;
+
+                        if (flag.len == 1) return .{ .illegal_option = "-" };
+
+                        if (flag.len > 2 and flag[1] == '-') {
+                            if (bun.strings.eqlComptime(flag, "--mode")) {
+                                return .{ .unsupported = "--mode" };
+                            } else if (bun.strings.eqlComptime(flag, "--parents")) {
+                                this.parents = true;
+                                return .continue_parsing;
+                            } else if (bun.strings.eqlComptime(flag, "--vebose")) {
+                                this.verbose = true;
+                                return .continue_parsing;
+                            }
+
+                            return .{ .illegal_option = flag };
+                        }
+
+                        const small_flags = flag[1..];
+                        for (small_flags, 0..) |char, i| {
+                            switch (char) {
+                                'm' => {
+                                    return .{ .unsupported = "-m " };
+                                },
+                                'p' => {
+                                    this.parents = true;
+                                },
+                                'v' => {
+                                    this.verbose = true;
+                                },
+                                else => {
+                                    return .{ .illegal_option = flag[1 + i ..] };
+                                },
+                            }
+                        }
+
+                        return .continue_parsing;
+                    }
+                };
             };
 
             /// 1 arg  => returns absolute path of the arg (not found becomes exit code 1)
@@ -4942,7 +5367,6 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     const err = task_.err;
                     task_.deinit();
 
-                    // const need_to_write_to_stdout_with_io = output.items.len > 0 and this.bltn.stdout.needsIO();
                     var queued: bool = false;
 
                     // Check for error, print it, but still want to print task output
@@ -5504,7 +5928,6 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     if (flag.len == 0) return .done;
                     if (flag[0] != '-') return .done;
 
-                    // FIXME windows
                     if (flag.len == 1) return .{ .illegal_option = "-" };
 
                     const small_flags = flag[1..];
@@ -7449,6 +7872,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
         pub const BufferedWriterParentPtr = struct {
             const Types = .{
+                BuiltinJs.Mkdir,
                 BuiltinJs.Export,
                 BuiltinJs.Echo,
                 BuiltinJs.Cd,
@@ -7457,6 +7881,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 BuiltinJs.Pwd,
                 BuiltinJs.Mv,
                 BuiltinJs.Ls,
+                BuiltinMini.Mkdir,
                 BuiltinMini.Export,
                 BuiltinMini.Echo,
                 BuiltinMini.Cd,
@@ -7494,6 +7919,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             }
 
             pub fn onDone(this: ParentPtr, e: ?Syscall.Error) void {
+                if (this.ptr.is(BuiltinJs.Mkdir)) return this.ptr.as(BuiltinJs.Mkdir).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Export)) return this.ptr.as(BuiltinJs.Export).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Echo)) return this.ptr.as(BuiltinJs.Echo).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Cd)) return this.ptr.as(BuiltinJs.Cd).onBufferedWriterDone(e);
@@ -7502,6 +7928,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 if (this.ptr.is(BuiltinJs.Pwd)) return this.ptr.as(BuiltinJs.Pwd).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Mv)) return this.ptr.as(BuiltinJs.Mv).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Ls)) return this.ptr.as(BuiltinJs.Ls).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinMini.Mkdir)) return this.ptr.as(BuiltinMini.Mkdir).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinMini.Export)) return this.ptr.as(BuiltinMini.Export).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinMini.Echo)) return this.ptr.as(BuiltinMini.Echo).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinMini.Cd)) return this.ptr.as(BuiltinMini.Cd).onBufferedWriterDone(e);
@@ -8475,83 +8902,3 @@ const ShellSyscall = struct {
         return Syscall.rmdirat(dirfd, to);
     }
 };
-
-// fn openat(dir: bun.FileDescriptor, path: [:0]const u8, flags: bun.Mode, perm: bun.Mode) Maybe(bun.FileDescriptor) {
-//     _ = perm; // autofix
-
-//     const O = std.os.O;
-//     const w = std.os.windows;
-
-//     // var wbuf: bun.WPathBuffer = undefined;
-//     // const pathu16 = bun.strings.toNTPath(&wbuf, file_path);
-
-//     var wide_buf: [windows.PATH_MAX_WIDE]u16 = undefined;
-//     Syscall.getFdPath(fd: bun.FileDescriptor, out_buffer: *[MAX_PATH_BYTES]u8)
-//     const wide_slice = std.os.windows.GetFinalPathNameByHandle(dir.cast(), .{}, wide_buf[0..]) catch {
-//         @panic("TODO");
-//     };
-//     var out_buffer: [bun.MAX_PATH_BYTES]u8 = undefined;
-
-//     const dirpath = bun.strings.fromWPath(out_buffer[0..], wide_slice);
-
-//     const parts: []const []const u8 = &[_][]const u8{
-//         dirpath,
-//         path[0..],
-//     };
-//     const joined = ResolvePath.join(parts, .windows);
-
-//     const joined_path = bun.strings.toWPath(&wide_buf, joined);
-
-//     const nonblock = flags & O.NONBLOCK != 0;
-//     const overwrite = flags & O.WRONLY != 0 and flags & O.APPEND == 0;
-
-//     var access_mask: w.ULONG = w.READ_CONTROL | w.FILE_WRITE_ATTRIBUTES | w.SYNCHRONIZE;
-//     if (flags & O.RDWR != 0) {
-//         access_mask |= w.GENERIC_READ | w.GENERIC_WRITE;
-//     } else if (flags & O.APPEND != 0) {
-//         access_mask |= w.GENERIC_WRITE | w.FILE_APPEND_DATA;
-//     } else if (flags & O.WRONLY != 0) {
-//         access_mask |= w.GENERIC_WRITE;
-//     } else {
-//         access_mask |= w.GENERIC_READ;
-//     }
-
-//     const creation: w.ULONG = blk: {
-//         if (flags & O.CREAT != 0) {
-//             if (flags & O.EXCL != 0) {
-//                 break :blk w.FILE_CREATE;
-//             }
-//             break :blk if (overwrite) w.FILE_OVERWRITE_IF else w.FILE_OPEN_IF;
-//         }
-//         break :blk if (overwrite) w.FILE_OVERWRITE else w.FILE_OPEN;
-//     };
-//     _ = creation; // autofix
-
-//     const blocking_flag: windows.ULONG = if (!nonblock) windows.FILE_SYNCHRONOUS_IO_NONALERT else 0;
-//     const file_or_dir_flag: windows.ULONG = switch (flags & O.DIRECTORY != 0) {
-//         // .file_only => windows.FILE_NON_DIRECTORY_FILE,
-//         true => windows.FILE_DIRECTORY_FILE,
-//         false => 0,
-//     };
-//     const follow_symlinks = flags & O.NOFOLLOW == 0;
-
-//     const options: windows.ULONG = if (follow_symlinks) file_or_dir_flag | blocking_flag else file_or_dir_flag | windows.FILE_OPEN_REPARSE_POINT;
-//     _ = options; // autofix
-
-//     const return_value = windows.CreateFileW(
-//         joined_path,
-//         access_mask,
-//         w.FILE_SHARE_WRITE | w.FILE_SHARE_READ | w.FILE_SHARE_DELETE,
-//         null,
-//         w.OPEN_ALWAYS,
-//         // w.FILE_ATTRIBUTE_NORMAL | w.FILE_FLAG_POSIX_SEMANTICS,
-//         w.FILE_ATTRIBUTE_NORMAL | w.FILE_FLAG_BACKUP_SEMANTICS,
-//         null,
-//     );
-
-//     if (return_value == windows.INVALID_HANDLE_VALUE) @panic("FUCK");
-
-//     return .{
-//         .result = bun.toFD(return_value),
-//     };
-// }
