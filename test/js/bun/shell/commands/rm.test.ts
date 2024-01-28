@@ -49,9 +49,9 @@ describe("bunshell rm", () => {
     // test on a file
     {
       expect(await fileExists(tempdir, `existent.txt`)).toBeTrue();
-      const { stdout, stderr, exitCode } = await $`rm -rv ${tempdir}/existent.txt`;
+      const { stdout, stderr, exitCode } = await $`rm -rv ${path.join(tempdir, "existent.txt")}`;
       expect(stderr.length).toBe(0);
-      expect(stdout.toString()).toEqual(`${tempdir}/existent.txt\n`);
+      expect(stdout.toString()).toEqual(`${path.join(tempdir, "existent.txt")}\n`);
       expect(exitCode).toBe(0);
       expect(await fileExists(tempdir, `existent.txt`)).toBeFalse();
     }
@@ -89,18 +89,18 @@ describe("bunshell rm", () => {
     {
       const tmpdir = TestBuilder.tmpdir();
       const { stdout, stderr } =
-        await $`mkdir foo; touch ./foo/lol ./foo/nice ./foo/lmao; mkdir foo/bar; touch ./foo/bar/great; touch ./foo/bar/wow; rm -rfv foo/`.cwd(
+        await $`mkdir foo; touch ./foo/lol ./foo/nice ./foo/lmao; mkdir foo/bar; touch ./foo/bar/great; touch ./foo/bar/wow; rm -rfv foo`.cwd(
           tmpdir,
         );
       expect(sortedShellOutput(stdout.toString())).toEqual(
         sortedShellOutput(
-          `foo/lol
-foo/nice
-foo/lmao
-foo/bar
-foo/bar/great
-foo/bar/wow
-foo/
+          `${path.join("foo", "lol")}
+${path.join("foo", "nice")}
+${path.join("foo", "lmao")}
+${path.join("foo", "bar")}
+${path.join("foo", "bar", "great")}
+${path.join("foo", "bar", "wow")}
+${path.join("foo")}
 `,
         ),
       );
