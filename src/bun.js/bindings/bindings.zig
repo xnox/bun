@@ -1618,6 +1618,13 @@ pub const SystemError = extern struct {
     pub const name = "SystemError";
     pub const namespace = "";
 
+    pub fn deref(this: *const SystemError) void {
+        this.path.deref();
+        this.code.deref();
+        this.message.deref();
+        this.syscall.deref();
+    }
+
     pub fn toErrorInstance(this: *const SystemError, global: *JSGlobalObject) JSValue {
         defer {
             this.path.deref();

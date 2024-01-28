@@ -3572,7 +3572,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             cwd: bun.FileDescriptor,
 
             impl: union(Kind) {
-                // touch: Touch,
+                touch: Touch,
                 mkdir: Mkdir,
                 @"export": Export,
                 cd: Cd,
@@ -3587,6 +3587,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             const Result = @import("../result.zig").Result;
 
             pub const Kind = enum {
+                touch,
                 mkdir,
                 @"export",
                 cd,
@@ -3603,6 +3604,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                 pub fn usageString(this: Kind) []const u8 {
                     return switch (this) {
+                        .touch => "usage: touch [-A [-][[hh]mm]SS] [-achm] [-r file] [-t [[CC]YY]MMDDhhmm[.SS]]\n       [-d YYYY-MM-DDThh:mm:SS[.frac][tz]] file ...",
                         .mkdir => "usage: mkdir [-pv] [-m mode] directory_name ...\n",
                         .@"export" => "",
                         .cd => "",
@@ -3620,6 +3622,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 }
 
                 pub fn fromStr(str: []const u8) ?Builtin.Kind {
+                    @setEvalBranchQuota(2000);
                     const tyinfo = @typeInfo(Builtin.Kind);
                     inline for (tyinfo.Enum.fields) |field| {
                         if (bun.strings.eqlComptime(str, field.name)) {
@@ -3728,6 +3731,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
             pub inline fn callImpl(this: *Builtin, comptime Ret: type, comptime field: []const u8, args_: anytype) Ret {
                 return switch (this.kind) {
+                    .touch => this.callImplWithType(Touch, Ret, "touch", field, args_),
                     .mkdir => this.callImplWithType(Mkdir, Ret, "mkdir", field, args_),
                     .@"export" => this.callImplWithType(Export, Ret, "export", field, args_),
                     .echo => this.callImplWithType(Echo, Ret, "echo", field, args_),
@@ -3812,6 +3816,11 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 };
 
                 switch (kind) {
+                    .touch => {
+                        cmd.exec.bltn.impl = .{
+                            .touch = Touch{ .bltn = &cmd.exec.bltn },
+                        };
+                    },
                     .mkdir => {
                         cmd.exec.bltn.impl = .{
                             .mkdir = Mkdir{ .bltn = &cmd.exec.bltn },
@@ -4354,6 +4363,302 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             pub const Touch = struct {
                 bltn: *Builtin,
                 opts: Opts = .{},
+                state: union(enum) {
+                    idle,
+                    exec: struct {
+                        started: bool = false,
+                        tasks_count: usize = 0,
+                        tasks_done: usize = 0,
+                        output_queue: std.DoublyLinkedList(BlockingOutput) = .{},
+                        started_output_queue: bool = false,
+                        args: []const [*:0]const u8,
+                        err: ?JSC.SystemError = null,
+                    },
+                    waiting_write_err: BufferedWriter,
+                    done,
+                } = .idle,
+
+                const BlockingOutput = struct {
+                    writer: BufferedWriter,
+                    arr: std.ArrayList(u8),
+
+                    pub fn deinit(this: *BlockingOutput) void {
+                        this.arr.deinit();
+                    }
+                };
+
+                pub fn deinit(this: *Touch) void {
+                    _ = this;
+                }
+
+                pub fn start(this: *Touch) Maybe(void) {
+                    const filepath_args = switch (this.opts.parse(this.bltn.argsSlice())) {
+                        .ok => |filepath_args| filepath_args,
+                        .err => |e| {
+                            const buf = switch (e) {
+                                .illegal_option => |opt_str| this.bltn.fmtErrorArena(.touch, "illegal option -- {s}\n", .{opt_str}),
+                                .show_usage => Builtin.Kind.touch.usageString(),
+                                .unsupported => |unsupported| this.bltn.fmtErrorArena(.touch, "unsupported option, please open a GitHub issue -- {s}\n", .{unsupported}),
+                            };
+
+                            _ = this.writeFailingError(buf, 1);
+                            return Maybe(void).success;
+                        },
+                    } orelse {
+                        _ = this.writeFailingError(Builtin.Kind.touch.usageString(), 1);
+                        return Maybe(void).success;
+                    };
+
+                    this.state = .{
+                        .exec = .{
+                            .args = filepath_args,
+                        },
+                    };
+
+                    _ = this.next();
+
+                    return Maybe(void).success;
+                }
+
+                pub fn next(this: *Touch) void {
+                    switch (this.state) {
+                        .idle => @panic("Invalid state"),
+                        .exec => {
+                            var exec = &this.state.exec;
+                            if (exec.started) {
+                                if (this.state.exec.tasks_done >= this.state.exec.tasks_count and this.state.exec.output_queue.len == 0) {
+                                    const exit_code: ExitCode = if (this.state.exec.err != null) 1 else 0;
+                                    this.state = .done;
+                                    this.bltn.done(exit_code);
+                                    return;
+                                }
+                                return;
+                            }
+
+                            exec.started = true;
+                            exec.tasks_count = exec.args.len;
+
+                            for (exec.args) |dir_to_mk_| {
+                                const dir_to_mk = dir_to_mk_[0..std.mem.len(dir_to_mk_) :0];
+                                var task = ShellTouchTask.create(this, this.opts, dir_to_mk, this.bltn.parentCmd().base.shell.cwdZ());
+                                task.schedule();
+                            }
+                        },
+                        .waiting_write_err => return,
+                        .done => this.bltn.done(0),
+                    }
+                }
+
+                pub fn onBufferedWriterDone(this: *Touch, e: ?Syscall.Error) void {
+                    _ = e; // autofix
+
+                    if (this.state == .waiting_write_err) {
+                        // if (e) |err| return this.bltn.done(1);
+                        return this.bltn.done(1);
+                    }
+
+                    var queue = &this.state.exec.output_queue;
+                    var first = queue.popFirst().?;
+                    defer {
+                        first.data.deinit();
+                        bun.default_allocator.destroy(first);
+                    }
+                    if (first.next) |next_writer| {
+                        next_writer.data.writer.writeIfPossible(false);
+                        return;
+                    }
+
+                    this.next();
+                }
+
+                pub fn queueBlockingOutput(this: *Touch, bo: BlockingOutput) void {
+                    _ = this.queueBlockingOutputImpl(bo, true);
+                }
+
+                pub fn queueBlockingOutputImpl(this: *Touch, bo: BlockingOutput, do_run: bool) CoroutineResult {
+                    const node = bun.default_allocator.create(std.DoublyLinkedList(BlockingOutput).Node) catch bun.outOfMemory();
+                    node.* = .{
+                        .data = bo,
+                    };
+                    this.state.exec.output_queue.append(node);
+
+                    // Start it
+                    if (this.state.exec.output_queue.len == 1 and do_run) {
+                        // if (do_run and !this.state.exec.started_output_queue) {
+                        this.state.exec.started_output_queue = true;
+                        this.state.exec.output_queue.first.?.data.writer.writeIfPossible(false);
+                        return .yield;
+                    }
+                    return .cont;
+                }
+
+                fn scheduleBlockingOutput(this: *Touch) CoroutineResult {
+                    if (this.state.exec.output_queue.len > 0) {
+                        this.state.exec.output_queue.first.?.data.writer.writeIfPossible(false);
+                        return .yield;
+                    }
+                    return .cont;
+                }
+
+                pub fn onAsyncTaskDone(this: *Touch, task: *ShellTouchTask) void {
+                    defer task.deinit();
+                    this.state.exec.tasks_done += 1;
+                    const err = task.err;
+                    var queued: bool = false;
+
+                    // Check for error, print it, but still want to print task output
+                    if (err) |e| {
+                        const error_string = this.bltn.taskErrorToString(.mkdir, e);
+                        this.state.exec.err = e;
+
+                        if (this.bltn.stderr.needsIO()) {
+                            queued = true;
+                            const blocking_output: BlockingOutput = .{
+                                .writer = switch (BufferedWriter.init(
+                                    this.bltn.stderr.expectFd(),
+                                    error_string,
+                                    BufferedWriter.ParentPtr.init(this),
+                                    this.bltn.stdBufferedBytelist(.stderr),
+                                )) {
+                                    .result => |bw| bw,
+                                    .err => |errrr| {
+                                        global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(errrr));
+                                        return;
+                                    },
+                                },
+                                .arr = std.ArrayList(u8).init(bun.default_allocator),
+                            };
+                            _ = this.queueBlockingOutputImpl(blocking_output, false);
+                            // if (!need_to_write_to_stdout_with_io) return; // yield execution
+                        } else {
+                            if (this.bltn.writeNoIO(.stderr, error_string).asErr()) |theerr| {
+                                global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(theerr));
+                            }
+                        }
+                    }
+
+                    if (queued) {
+                        if (this.scheduleBlockingOutput() == .yield) return;
+                        if (this.state == .done) return;
+                        return this.next();
+                    }
+
+                    return this.next();
+                }
+
+                pub fn writeFailingError(this: *Touch, buf: []const u8, exit_code: ExitCode) Maybe(void) {
+                    if (this.bltn.stderr.needsIO()) {
+                        const fd = this.bltn.stderr.expectFd();
+                        const bw = switch (BufferedWriter.init(fd, buf, BufferedWriter.ParentPtr.init(this), this.bltn.stdBufferedBytelist(.stderr))) {
+                            .result => |bw| bw,
+                            .err => |e| return .{ .err = e.withFd(fd) },
+                        };
+                        this.state = .{ .waiting_write_err = bw };
+                        this.state.waiting_write_err.writeIfPossible(false);
+                        return Maybe(void).success;
+                    }
+
+                    if (this.bltn.writeNoIO(.stderr, buf).asErr()) |e| {
+                        return .{ .err = e };
+                    }
+
+                    this.bltn.done(exit_code);
+                    return Maybe(void).success;
+                }
+
+                pub const ShellTouchTask = struct {
+                    touch: *Touch,
+
+                    opts: Opts,
+                    filepath: [:0]const u8,
+                    cwd_path: [:0]const u8,
+
+                    err: ?JSC.SystemError = null,
+                    task: JSC.WorkPoolTask = .{ .callback = &runFromThreadPool },
+                    event_loop: EventLoopRef,
+                    concurrent_task: EventLoopTask = .{},
+
+                    const print = bun.Output.scoped(.ShellTouchTask, false);
+
+                    pub fn deinit(this: *ShellTouchTask) void {
+                        if (this.err) |e| {
+                            e.deref();
+                        }
+                        bun.default_allocator.destroy(this);
+                    }
+
+                    pub fn create(touch: *Touch, opts: Opts, filepath: [:0]const u8, cwd_path: [:0]const u8) *ShellTouchTask {
+                        const task = bun.default_allocator.create(ShellTouchTask) catch bun.outOfMemory();
+                        task.* = ShellTouchTask{
+                            .touch = touch,
+                            .opts = opts,
+                            .cwd_path = cwd_path,
+                            .filepath = filepath,
+                            .event_loop = event_loop_ref.get(),
+                        };
+                        return task;
+                    }
+
+                    pub fn schedule(this: *@This()) void {
+                        print("schedule", .{});
+                        WorkPool.schedule(&this.task);
+                    }
+
+                    pub fn runFromMainThread(this: *@This()) void {
+                        print("runFromJS", .{});
+                        this.touch.onAsyncTaskDone(this);
+                    }
+
+                    pub fn runFromMainThreadMini(this: *@This(), _: *void) void {
+                        this.runFromMainThread();
+                    }
+
+                    fn runFromThreadPool(task: *JSC.WorkPoolTask) void {
+                        var this: *ShellTouchTask = @fieldParentPtr(ShellTouchTask, "task", task);
+
+                        // We have to give an absolute path
+                        const filepath: [:0]const u8 = brk: {
+                            if (ResolvePath.Platform.auto.isAbsolute(this.filepath)) break :brk this.filepath;
+                            const parts: []const []const u8 = &.{
+                                this.cwd_path[0..],
+                                this.filepath[0..],
+                            };
+                            break :brk ResolvePath.joinZ(parts, .auto);
+                        };
+
+                        var node_fs = JSC.Node.NodeFS{};
+                        const milliseconds: f64 = @floatFromInt(std.time.milliTimestamp());
+                        const atime: JSC.Node.TimeLike = if (bun.Environment.isWindows) milliseconds / 1000.0 else JSC.Node.TimeLike{
+                            .tv_sec = @intFromFloat(@divFloor(milliseconds, std.time.ms_per_s)),
+                            .tv_nsec = @intFromFloat(@mod(milliseconds, std.time.ms_per_s) * std.time.ns_per_ms),
+                        };
+                        const mtime = atime;
+                        const args = JSC.Node.Arguments.Utimes{
+                            .atime = atime,
+                            .mtime = mtime,
+                            .path = .{ .string = bun.PathString.init(filepath) },
+                        };
+                        if (node_fs.utimes(args, .callback).asErr()) |err| out: {
+                            if (err.getErrno() == bun.C.E.NOENT) {
+                                const perm = 0o664;
+                                switch (Syscall.open(filepath, std.os.O.CREAT | std.os.O.WRONLY, perm)) {
+                                    .result => break :out,
+                                    .err => |e| {
+                                        this.err = e.withPath(bun.default_allocator.dupe(u8, filepath) catch bun.outOfMemory()).toSystemError();
+                                        break :out;
+                                    },
+                                }
+                            }
+                            this.err = err.withPath(bun.default_allocator.dupe(u8, filepath) catch bun.outOfMemory()).toSystemError();
+                        }
+
+                        if (comptime EventLoopKind == .js) {
+                            this.event_loop.enqueueTaskConcurrent(this.concurrent_task.from(this, .manual_deinit));
+                        } else {
+                            this.event_loop.enqueueTaskConcurrent(this.concurrent_task.from(this, "runFromMainThreadMini"));
+                        }
+                    }
+                };
 
                 const Opts = struct {
                     /// -a
@@ -4399,15 +4704,72 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     /// WORD is modify or mtime: equivalent to -m
                     time: ?[]const u8 = null,
 
-                    /// --help
-                    ///
-                    /// display this help and exit
-                    help: bool = false,
+                    const Parse = FlagParser(*@This());
 
-                    /// --version
-                    ///
-                    /// output version information and exit
-                    version: bool = false,
+                    pub fn parse(opts: *Opts, args: []const [*:0]const u8) Result(?[]const [*:0]const u8, ParseError) {
+                        return Parse.parseFlags(opts, args);
+                    }
+
+                    pub fn parseLong(this: *Opts, flag: []const u8) ParseFlagResult {
+                        _ = this;
+                        if (bun.strings.eqlComptime(flag, "--no-create")) {
+                            return .{
+                                .unsupported = unsupportedFlag("--no-create"),
+                            };
+                        }
+
+                        if (bun.strings.eqlComptime(flag, "--date")) {
+                            return .{
+                                .unsupported = unsupportedFlag("--date"),
+                            };
+                        }
+
+                        if (bun.strings.eqlComptime(flag, "--reference")) {
+                            return .{
+                                .unsupported = unsupportedFlag("--reference=FILE"),
+                            };
+                        }
+
+                        if (bun.strings.eqlComptime(flag, "--time")) {
+                            return .{
+                                .unsupported = unsupportedFlag("--reference=FILE"),
+                            };
+                        }
+
+                        return .{ .illegal_option = flag };
+                    }
+
+                    fn parseShort(this: *Opts, char: u8, smallflags: []const u8, i: usize) ?ParseFlagResult {
+                        _ = this;
+                        switch (char) {
+                            'a' => {
+                                return .{ .unsupported = unsupportedFlag("-a") };
+                            },
+                            'c' => {
+                                return .{ .unsupported = unsupportedFlag("-c") };
+                            },
+                            'd' => {
+                                return .{ .unsupported = unsupportedFlag("-d") };
+                            },
+                            'h' => {
+                                return .{ .unsupported = unsupportedFlag("-h") };
+                            },
+                            'm' => {
+                                return .{ .unsupported = unsupportedFlag("-m") };
+                            },
+                            'r' => {
+                                return .{ .unsupported = unsupportedFlag("-r") };
+                            },
+                            't' => {
+                                return .{ .unsupported = unsupportedFlag("-t") };
+                            },
+                            else => {
+                                return .{ .illegal_option = smallflags[1 + i ..] };
+                            },
+                        }
+
+                        return null;
+                    }
                 };
             };
 
@@ -7942,6 +8304,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
         pub const BufferedWriterParentPtr = struct {
             const Types = .{
+                BuiltinJs.Touch,
                 BuiltinJs.Mkdir,
                 BuiltinJs.Export,
                 BuiltinJs.Echo,
@@ -7951,6 +8314,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 BuiltinJs.Pwd,
                 BuiltinJs.Mv,
                 BuiltinJs.Ls,
+                BuiltinMini.Touch,
                 BuiltinMini.Mkdir,
                 BuiltinMini.Export,
                 BuiltinMini.Echo,
@@ -7989,6 +8353,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             }
 
             pub fn onDone(this: ParentPtr, e: ?Syscall.Error) void {
+                if (this.ptr.is(BuiltinJs.Touch)) return this.ptr.as(BuiltinJs.Touch).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Mkdir)) return this.ptr.as(BuiltinJs.Mkdir).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Export)) return this.ptr.as(BuiltinJs.Export).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Echo)) return this.ptr.as(BuiltinJs.Echo).onBufferedWriterDone(e);
@@ -7998,6 +8363,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 if (this.ptr.is(BuiltinJs.Pwd)) return this.ptr.as(BuiltinJs.Pwd).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Mv)) return this.ptr.as(BuiltinJs.Mv).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Ls)) return this.ptr.as(BuiltinJs.Ls).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinMini.Touch)) return this.ptr.as(BuiltinMini.Touch).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinMini.Mkdir)) return this.ptr.as(BuiltinMini.Mkdir).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinMini.Export)) return this.ptr.as(BuiltinMini.Export).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinMini.Echo)) return this.ptr.as(BuiltinMini.Echo).onBufferedWriterDone(e);
@@ -8979,7 +9345,10 @@ pub const ParseError = union(enum) {
     unsupported: []const u8,
     show_usage,
 };
-pub const ParseFlagResult = union(enum) { continue_parsing, done, illegal_option: []const u8, unsupported: []const u8 };
+pub fn unsupportedFlag(comptime name: []const u8) []const u8 {
+    return "unsupported option, please open a GitHub issue -- " ++ name ++ "\n";
+}
+pub const ParseFlagResult = union(enum) { continue_parsing, done, illegal_option: []const u8, unsupported: []const u8, show_usage };
 pub fn FlagParser(comptime Opts: type) type {
     return struct {
         pub const Result = @import("../result.zig").Result;
@@ -9000,6 +9369,7 @@ pub fn FlagParser(comptime Opts: type) type {
                     .continue_parsing => {},
                     .illegal_option => |opt_str| return .{ .err = .{ .illegal_option = opt_str } },
                     .unsupported => |unsp| return .{ .err = .{ .unsupported = unsp } },
+                    .show_usage => return .{ .err = .show_usage },
                 }
             }
 
