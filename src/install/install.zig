@@ -1627,6 +1627,25 @@ pub const PackageInstall = struct {
         }
     }
 
+    pub fn isDanglingWindowsBinLink(node_mod_fd: bun.FileDescriptor, path: []const u16, temp_buffer: []u8) bool {
+        const WinBinLinkingShim = @import("./windows-shim/BinLinkingShim.zig");
+        const bin_path = bin_path: {
+            const fd = bun.sys.openatWindows(node_mod_fd, path, std.os.O.RDONLY).unwrap() catch return true;
+            defer _ = bun.sys.close(fd);
+            const size = fd.asFile().readAll(temp_buffer) catch return true;
+            const decoded = WinBinLinkingShim.looseDecode(temp_buffer[0..size]) orelse return true;
+            std.debug.assert(decoded.flags.isValid()); // looseDecode ensures valid flags
+            break :bin_path decoded.bin_path;
+        };
+
+        {
+            const fd = bun.sys.openatWindows(node_mod_fd, bin_path, std.os.O.RDONLY).unwrap() catch return true;
+            _ = bun.sys.close(fd);
+        }
+
+        return false;
+    }
+
     pub fn installFromLink(this: *PackageInstall, skip_delete: bool) Result {
         const dest_path = this.destination_dir_subpath;
         // If this fails, we don't care.
@@ -6534,11 +6553,6 @@ pub const PackageManager = struct {
     }
 
     pub inline fn link(ctx: Command.Context) !void {
-        if (comptime Environment.isWindows) {
-            Output.prettyErrorln("<r><red>error:<r> bun link is not supported on Windows yet", .{});
-            Global.crash();
-        }
-
         var manager = PackageManager.init(ctx, .link) catch |err| brk: {
             if (err == error.MissingPackageJSON) {
                 try attemptToCreatePackageJSON();
@@ -6628,12 +6642,37 @@ pub const PackageManager = struct {
                     }
                 }
 
-                // create the symlink
-                node_modules.symLink(Fs.FileSystem.instance.topLevelDirWithoutTrailingSlash(), name, .{ .is_directory = true }) catch |err| {
-                    if (manager.options.log_level != .silent)
-                        Output.prettyErrorln("<r><red>error:<r> failed to create symlink to node_modules in global dir due to error {s}", .{@errorName(err)});
-                    Global.crash();
-                };
+                if (comptime Environment.isWindows) {
+                    // create the junction
+                    const top_level = Fs.FileSystem.instance.topLevelDirWithoutTrailingSlash();
+                    var link_path_buf: bun.PathBuffer = undefined;
+                    @memcpy(
+                        link_path_buf[0..top_level.len],
+                        top_level,
+                    );
+                    link_path_buf[top_level.len] = 0;
+                    const link_path = link_path_buf[0..top_level.len :0];
+                    const global_path = try manager.globalLinkDirPath();
+                    const dest_path = Path.joinAbsStringZ(global_path, &.{name}, .windows);
+                    switch (bun.sys.sys_uv.symlinkUV(
+                        link_path,
+                        dest_path,
+                        bun.windows.libuv.UV_FS_SYMLINK_JUNCTION,
+                    )) {
+                        .err => |err| {
+                            Output.prettyErrorln("<r><red>error:<r> failed to create junction to node_modules in global dir due to error {}", .{err});
+                            Global.crash();
+                        },
+                        .result => {},
+                    }
+                } else {
+                    // create the symlink
+                    node_modules.symLink(Fs.FileSystem.instance.topLevelDirWithoutTrailingSlash(), name, .{ .is_directory = true }) catch |err| {
+                        if (manager.options.log_level != .silent)
+                            Output.prettyErrorln("<r><red>error:<r> failed to create symlink to node_modules in global dir due to error {s}", .{@errorName(err)});
+                        Global.crash();
+                    };
+                }
             }
 
             // Step 3b. Link any global bins
@@ -6689,11 +6728,6 @@ pub const PackageManager = struct {
     }
 
     pub inline fn unlink(ctx: Command.Context) !void {
-        if (comptime Environment.isWindows) {
-            Output.prettyErrorln("<r><red>error:<r> bun unlink is not supported on Windows yet", .{});
-            Global.crash();
-        }
-
         var manager = PackageManager.init(ctx, .unlink) catch |err| brk: {
             if (err == error.MissingPackageJSON) {
                 try attemptToCreatePackageJSON();
@@ -6750,7 +6784,7 @@ pub const PackageManager = struct {
 
             switch (Syscall.lstat(Path.joinAbsStringZ(try manager.globalLinkDirPath(), &.{name}, .auto))) {
                 .result => |stat| {
-                    if (!std.os.S.ISLNK(stat.mode)) {
+                    if (!bun.S.ISLNK(@intCast(stat.mode))) {
                         Output.prettyErrorln("<r><green>success:<r> package \"{s}\" is not globally linked, so there's nothing to do.", .{name});
                         Global.exit(0);
                     }

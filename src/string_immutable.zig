@@ -24,7 +24,7 @@ pub inline fn contains(self: string, str: string) bool {
     return indexOf(self, str) != null;
 }
 
-pub fn w(comptime str: []const u8) [:0]const u16 {
+pub inline fn w(comptime str: []const u8) [:0]const u16 {
     if (!@inComptime()) @compileError("strings.w() must be called in a comptime context");
     comptime var output: [str.len + 1]u16 = undefined;
 
@@ -832,6 +832,10 @@ pub fn hasPrefixComptimeUTF16(self: []const u16, comptime alt: []const u8) bool 
     return self.len >= alt.len and eqlComptimeCheckLenWithType(u16, self[0..alt.len], comptime toUTF16Literal(alt), false);
 }
 
+pub fn hasPrefixComptimeType(comptime T: type, self: []const T, comptime alt: []const T) bool {
+    return self.len >= alt.len and eqlComptimeCheckLenWithType(u16, self[0..alt.len], alt, false);
+}
+
 pub fn hasSuffixComptime(self: string, comptime alt: anytype) bool {
     return self.len >= alt.len and eqlComptimeCheckLenWithType(u8, self[self.len - alt.len ..], alt, false);
 }
@@ -1320,7 +1324,7 @@ pub fn toUTF16Alloc(allocator: std.mem.Allocator, bytes: []const u8, comptime fa
             if (trimmed.len == 0)
                 break :simd null;
 
-            const out_length = bun.simdutf.length.utf16.from.utf8.le(trimmed);
+            const out_length = bun.simdutf.length.utf16.from.utf8(trimmed);
 
             if (out_length == 0)
                 break :simd null;
@@ -1434,7 +1438,7 @@ pub fn toUTF16Alloc(allocator: std.mem.Allocator, bytes: []const u8, comptime fa
 pub fn toUTF16AllocNoTrim(allocator: std.mem.Allocator, bytes: []const u8, comptime fail_if_invalid: bool) !?[]u16 {
     if (strings.firstNonASCII(bytes)) |i| {
         const output_: ?std.ArrayList(u16) = if (comptime bun.FeatureFlags.use_simdutf) simd: {
-            const out_length = bun.simdutf.length.utf16.from.utf8.le(bytes);
+            const out_length = bun.simdutf.length.utf16.from.utf8(bytes);
 
             if (out_length == 0)
                 break :simd null;
@@ -1626,8 +1630,15 @@ pub fn toNTPath(wbuf: []u16, utf8: []const u8) [:0]const u16 {
         return toWPathNormalized(wbuf, utf8);
     }
 
-    wbuf[0..4].* = [_]u16{ '\\', '?', '?', '\\' };
+    wbuf[0..4].* = bun.windows.nt_object_prefix;
     return wbuf[0 .. toWPathNormalized(wbuf[4..], utf8).len + 4 :0];
+}
+
+pub fn addNTPathPrefix(wbuf: []u16, utf16: []const u16) [:0]const u16 {
+    wbuf[0..bun.windows.nt_object_prefix.len].* = bun.windows.nt_object_prefix;
+    @memcpy(wbuf[bun.windows.nt_object_prefix.len..][0..utf16.len], utf16);
+    wbuf[utf16.len + bun.windows.nt_object_prefix.len] = 0;
+    return wbuf[0 .. utf16.len + bun.windows.nt_object_prefix.len :0];
 }
 
 // These are the same because they don't have rules like needing a trailing slash
@@ -1696,11 +1707,6 @@ pub fn toWDirPath(wbuf: []u16, utf8: []const u8) [:0]const u16 {
 
 pub fn assertIsValidWindowsPath(utf8: []const u8) void {
     if (Environment.allow_assert and Environment.isWindows) {
-        if (windowsPathIsPosixAbsolute(utf8)) {
-            std.debug.panic("Do not pass posix paths to windows APIs, was given '{s}' (missing a root like 'C:\\', see PosixToWinNormalizer for why this is an assertion)", .{
-                utf8,
-            });
-        }
         if (startsWith(utf8, ":/")) {
             std.debug.panic("Path passed to windows API '{s}' is almost certainly invalid. Where did the drive letter go?", .{
                 utf8,
@@ -3200,7 +3206,7 @@ pub fn elementLengthUTF8IntoUTF16(comptime Type: type, utf8: Type) usize {
     var count: usize = 0;
 
     if (bun.FeatureFlags.use_simdutf) {
-        return bun.simdutf.length.utf16.from.utf8.le(utf8);
+        return bun.simdutf.length.utf16.from.utf8(utf8);
     }
 
     while (firstNonASCII(utf8_remaining)) |i| {
@@ -5253,7 +5259,7 @@ pub fn concatIfNeeded(
 pub fn convertUTF8toUTF16InBuffer(
     buf: []u16,
     input: []const u8,
-) []const u16 {
+) []u16 {
     if (!Environment.isWindows) @compileError("please dont't use this function on posix until fixing the todos.");
 
     const result = bun.simdutf.convert.utf8.to.utf16.with_errors.le(input, buf);
@@ -5841,3 +5847,17 @@ pub const QuoteEscapeFormat = struct {
         try writer.writeAll(self.data[i..]);
     }
 };
+
+/// Generic. Works on []const u8, []const u16, etc
+pub inline fn indexOfScalar(input: anytype, scalar: std.meta.Child(@TypeOf(input))) ?usize {
+    if (comptime std.meta.Child(@TypeOf(input)) == u8) {
+        return strings.indexOfCharUsize(input, scalar);
+    } else {
+        return std.mem.indexOfScalar(std.meta.Child(@TypeOf(input)), input, scalar);
+    }
+}
+
+/// Generic. Works on []const u8, []const u16, etc
+pub fn containsScalar(input: anytype, item: std.meta.Child(@TypeOf(input))) bool {
+    return indexOfScalar(input, item) != null;
+}

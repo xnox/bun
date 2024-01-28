@@ -66,8 +66,12 @@ pub fn Maybe(comptime ResultType: type) type {
         };
 
         pub inline fn todo() @This() {
-            if (Environment.isDebug) {
-                @panic("Maybe(" ++ @typeName(ReturnType) ++ ").todo() Called");
+            if (Environment.allow_assert) {
+                if (comptime ResultType == void) {
+                    @panic("TODO called!");
+                }
+
+                @panic(comptime "TODO: Maybe(" ++ bun.meta.typeBaseName(@typeName(ReturnType)) ++ ")");
             }
             return .{ .err = Syscall.Error.todo() };
         }
@@ -142,7 +146,7 @@ pub fn Maybe(comptime ResultType: type) type {
                 else => |err| @This(){
                     // always truncate
                     .err = .{
-                        .errno = @truncate(@intFromEnum(err)),
+                        .errno = translateToErrInt(err),
                         .syscall = syscall,
                     },
                 },
@@ -153,7 +157,7 @@ pub fn Maybe(comptime ResultType: type) type {
             return @This(){
                 // always truncate
                 .err = .{
-                    .errno = @truncate(@intFromEnum(err)),
+                    .errno = translateToErrInt(err),
                     .syscall = syscall,
                 },
             };
@@ -165,7 +169,7 @@ pub fn Maybe(comptime ResultType: type) type {
                 else => |err| @This(){
                     // always truncate
                     .err = .{
-                        .errno = @truncate(@intFromEnum(err)),
+                        .errno = translateToErrInt(err),
                         .syscall = syscall,
                         .fd = fd,
                     },
@@ -182,13 +186,21 @@ pub fn Maybe(comptime ResultType: type) type {
                 else => |err| @This(){
                     // always truncate
                     .err = .{
-                        .errno = @truncate(@intFromEnum(err)),
+                        .errno = translateToErrInt(err),
                         .syscall = syscall,
                         .path = bun.asByteSlice(path),
                     },
                 },
             };
         }
+    };
+}
+
+fn translateToErrInt(err: anytype) bun.sys.Error.Int {
+    return switch (@TypeOf(err)) {
+        bun.windows.Win32Error => @intFromEnum(bun.windows.translateWinErrorToErrno(err)),
+        bun.windows.NTSTATUS => @intFromEnum(bun.windows.translateNTStatusToErrno(err)),
+        else => @truncate(@intFromEnum(err)),
     };
 }
 
@@ -2414,7 +2426,7 @@ pub const Path = struct {
 
 pub const Process = struct {
     pub fn getArgv0(globalObject: *JSC.JSGlobalObject) callconv(.C) JSC.JSValue {
-        return JSC.ZigString.fromUTF8(bun.span(bun.argv()[0])).toValueGC(globalObject);
+        return JSC.ZigString.fromUTF8(bun.argv()[0]).toValueGC(globalObject);
     }
 
     pub fn getExecPath(globalObject: *JSC.JSGlobalObject) callconv(.C) JSC.JSValue {
@@ -2452,8 +2464,7 @@ pub const Process = struct {
         var used: usize = 0;
         const offset: usize = 1;
 
-        for (bun.argv()[@min(bun.argv().len, offset)..]) |arg_| {
-            const arg = bun.span(arg_);
+        for (bun.argv()[@min(bun.argv().len, offset)..]) |arg| {
             if (arg.len == 0)
                 continue;
 
