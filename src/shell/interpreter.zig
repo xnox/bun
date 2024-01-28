@@ -3572,6 +3572,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             cwd: bun.FileDescriptor,
 
             impl: union(Kind) {
+                // touch: Touch,
                 mkdir: Mkdir,
                 @"export": Export,
                 cd: Cd,
@@ -4350,6 +4351,66 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 }
             };
 
+            pub const Touch = struct {
+                bltn: *Builtin,
+                opts: Opts = .{},
+
+                const Opts = struct {
+                    /// -a
+                    ///
+                    /// change only the access time
+                    access_time_only: bool = false,
+
+                    /// -c, --no-create
+                    ///
+                    /// do not create any files
+                    no_create: bool = false,
+
+                    /// -d, --date=STRING
+                    ///
+                    /// parse STRING and use it instead of current time
+                    date: ?[]const u8 = null,
+
+                    /// -h, --no-dereference
+                    ///
+                    /// affect each symbolic link instead of any referenced file
+                    /// (useful only on systems that can change the timestamps of a symlink)
+                    no_dereference: bool = false,
+
+                    /// -m
+                    ///
+                    /// change only the modification time
+                    modification_time_only: bool = false,
+
+                    /// -r, --reference=FILE
+                    ///
+                    /// use this file's times instead of current time
+                    reference: ?[]const u8 = null,
+
+                    /// -t STAMP
+                    ///
+                    /// use [[CC]YY]MMDDhhmm[.ss] instead of current time
+                    timestamp: ?[]const u8 = null,
+
+                    /// --time=WORD
+                    ///
+                    /// change the specified time:
+                    /// WORD is access, atime, or use: equivalent to -a
+                    /// WORD is modify or mtime: equivalent to -m
+                    time: ?[]const u8 = null,
+
+                    /// --help
+                    ///
+                    /// display this help and exit
+                    help: bool = false,
+
+                    /// --version
+                    ///
+                    /// output version information and exit
+                    version: bool = false,
+                };
+            };
+
             pub const Mkdir = struct {
                 bltn: *Builtin,
                 opts: Opts = .{},
@@ -4735,76 +4796,43 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     /// print a message for each created directory
                     verbose: bool = false,
 
-                    /// Custom parse error for invalid options
-                    const ParseError = union(enum) {
-                        illegal_option: []const u8,
-                        unsupported: []const u8,
-                        show_usage,
-                    };
+                    const Parse = FlagParser(*@This());
 
-                    fn parse(this: *Opts, args: []const [*:0]const u8) Result(?[]const [*:0]const u8, Opts.ParseError) {
-                        var idx: usize = 0;
-                        if (args.len == 0) {
-                            return .{ .ok = null };
-                        }
-
-                        while (idx < args.len) : (idx += 1) {
-                            const flag = args[idx];
-                            switch (this.parseFlag(flag[0..std.mem.len(flag)])) {
-                                .done => {
-                                    const filepath_args = args[idx..];
-                                    return .{ .ok = filepath_args };
-                                },
-                                .continue_parsing => {},
-                                .illegal_option => |opt_str| return .{ .err = .{ .illegal_option = opt_str } },
-                                .unsupported => |unsp| return .{ .err = .{ .unsupported = unsp } },
-                            }
-                        }
-
-                        return .{ .err = .show_usage };
+                    pub fn parse(opts: *Opts, args: []const [*:0]const u8) Result(?[]const [*:0]const u8, ParseError) {
+                        return Parse.parseFlags(opts, args);
                     }
 
-                    const ParseFlagResult = union(enum) { continue_parsing, done, illegal_option: []const u8, unsupported: []const u8 };
+                    pub fn parseLong(this: *Opts, flag: []const u8) ParseFlagResult {
+                        if (bun.strings.eqlComptime(flag, "--mode")) {
+                            return .{ .unsupported = "--mode" };
+                        } else if (bun.strings.eqlComptime(flag, "--parents")) {
+                            this.parents = true;
+                            return .continue_parsing;
+                        } else if (bun.strings.eqlComptime(flag, "--vebose")) {
+                            this.verbose = true;
+                            return .continue_parsing;
+                        }
 
-                    fn parseFlag(this: *Opts, flag: []const u8) ParseFlagResult {
-                        if (flag.len == 0) return .done;
-                        if (flag[0] != '-') return .done;
+                        return .{ .illegal_option = flag };
+                    }
 
-                        if (flag.len == 1) return .{ .illegal_option = "-" };
-
-                        if (flag.len > 2 and flag[1] == '-') {
-                            if (bun.strings.eqlComptime(flag, "--mode")) {
-                                return .{ .unsupported = "--mode" };
-                            } else if (bun.strings.eqlComptime(flag, "--parents")) {
+                    fn parseShort(this: *Opts, char: u8, smallflags: []const u8, i: usize) ?ParseFlagResult {
+                        switch (char) {
+                            'm' => {
+                                return .{ .unsupported = "-m " };
+                            },
+                            'p' => {
                                 this.parents = true;
-                                return .continue_parsing;
-                            } else if (bun.strings.eqlComptime(flag, "--vebose")) {
+                            },
+                            'v' => {
                                 this.verbose = true;
-                                return .continue_parsing;
-                            }
-
-                            return .{ .illegal_option = flag };
+                            },
+                            else => {
+                                return .{ .illegal_option = smallflags[1 + i ..] };
+                            },
                         }
 
-                        const small_flags = flag[1..];
-                        for (small_flags, 0..) |char, i| {
-                            switch (char) {
-                                'm' => {
-                                    return .{ .unsupported = "-m " };
-                                },
-                                'p' => {
-                                    this.parents = true;
-                                },
-                                'v' => {
-                                    this.verbose = true;
-                                },
-                                else => {
-                                    return .{ .illegal_option = flag[1 + i ..] };
-                                },
-                            }
-                        }
-
-                        return .continue_parsing;
+                        return null;
                     }
                 };
             };
@@ -8944,3 +8972,58 @@ const ShellSyscall = struct {
         return Syscall.rmdirat(dirfd, to);
     }
 };
+
+/// Custom parse error for invalid options
+pub const ParseError = union(enum) {
+    illegal_option: []const u8,
+    unsupported: []const u8,
+    show_usage,
+};
+pub const ParseFlagResult = union(enum) { continue_parsing, done, illegal_option: []const u8, unsupported: []const u8 };
+pub fn FlagParser(comptime Opts: type) type {
+    return struct {
+        pub const Result = @import("../result.zig").Result;
+
+        pub fn parseFlags(opts: Opts, args: []const [*:0]const u8) Result(?[]const [*:0]const u8, ParseError) {
+            var idx: usize = 0;
+            if (args.len == 0) {
+                return .{ .ok = null };
+            }
+
+            while (idx < args.len) : (idx += 1) {
+                const flag = args[idx];
+                switch (parseFlag(opts, flag[0..std.mem.len(flag)])) {
+                    .done => {
+                        const filepath_args = args[idx..];
+                        return .{ .ok = filepath_args };
+                    },
+                    .continue_parsing => {},
+                    .illegal_option => |opt_str| return .{ .err = .{ .illegal_option = opt_str } },
+                    .unsupported => |unsp| return .{ .err = .{ .unsupported = unsp } },
+                }
+            }
+
+            return .{ .err = .show_usage };
+        }
+
+        fn parseFlag(opts: Opts, flag: []const u8) ParseFlagResult {
+            if (flag.len == 0) return .done;
+            if (flag[0] != '-') return .done;
+
+            if (flag.len == 1) return .{ .illegal_option = "-" };
+
+            if (flag.len > 2 and flag[1] == '-') {
+                return opts.parseLong(flag);
+            }
+
+            const small_flags = flag[1..];
+            for (small_flags, 0..) |char, i| {
+                if (opts.parseShort(char, small_flags, i)) |err| {
+                    return err;
+                }
+            }
+
+            return .continue_parsing;
+        }
+    };
+}
