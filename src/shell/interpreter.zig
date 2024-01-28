@@ -4654,18 +4654,41 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         };
 
                         var node_fs = JSC.Node.NodeFS{};
-                        const args = JSC.Node.Arguments.Mkdir{
-                            .path = JSC.Node.PathLike{ .string = bun.PathString.init(filepath) },
-                            .recursive = this.opts.parents,
-                            .always_return_none = true,
-                        };
+                        // Recursive
+                        if (this.opts.parents) {
+                            const args = JSC.Node.Arguments.Mkdir{
+                                .path = JSC.Node.PathLike{ .string = bun.PathString.init(filepath) },
+                                .recursive = true,
+                                .always_return_none = true,
+                            };
 
-                        switch (node_fs.mkdir(args, .callback)) {
-                            .result => {},
-                            .err => |e| {
-                                this.err = e.withPath(bun.default_allocator.dupe(u8, filepath) catch bun.outOfMemory()).toSystemError();
-                                std.mem.doNotOptimizeAway(&node_fs);
-                            },
+                            var vtable = MkdirVerboseVTable{ .inner = this, .active = this.opts.verbose };
+
+                            switch (node_fs.mkdirRecursiveImpl(args, .callback, *MkdirVerboseVTable, &vtable)) {
+                                .result => {},
+                                .err => |e| {
+                                    this.err = e.withPath(bun.default_allocator.dupe(u8, filepath) catch bun.outOfMemory()).toSystemError();
+                                    std.mem.doNotOptimizeAway(&node_fs);
+                                },
+                            }
+                        } else {
+                            const args = JSC.Node.Arguments.Mkdir{
+                                .path = JSC.Node.PathLike{ .string = bun.PathString.init(filepath) },
+                                .recursive = false,
+                                .always_return_none = true,
+                            };
+                            switch (node_fs.mkdirNonRecursive(args, .callback)) {
+                                .result => {
+                                    if (this.opts.verbose) {
+                                        this.created_directories.appendSlice(filepath[0..filepath.len]) catch bun.outOfMemory();
+                                        this.created_directories.append('\n') catch bun.outOfMemory();
+                                    }
+                                },
+                                .err => |e| {
+                                    this.err = e.withPath(bun.default_allocator.dupe(u8, filepath) catch bun.outOfMemory()).toSystemError();
+                                    std.mem.doNotOptimizeAway(&node_fs);
+                                },
+                            }
                         }
 
                         if (comptime EventLoopKind == .js) {
@@ -4674,6 +4697,25 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             this.event_loop.enqueueTaskConcurrent(this.concurrent_task.from(this, "runFromMainThreadMini"));
                         }
                     }
+
+                    const MkdirVerboseVTable = struct {
+                        inner: *ShellMkdirTask,
+                        active: bool,
+
+                        pub fn onCreateDir(vtable: *@This(), dirpath: bun.OSPathSliceZ) void {
+                            if (!vtable.active) return;
+                            if (bun.Environment.isWindows) {
+                                var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+                                const str = bun.strings.fromWPath(&buf, dirpath[0..dirpath.len]);
+                                vtable.inner.created_directories.appendSlice(str) catch bun.outOfMemory();
+                                vtable.inner.created_directories.append('\n') catch bun.outOfMemory();
+                            } else {
+                                vtable.inner.created_directories.appendSlice(dirpath) catch bun.outOfMemory();
+                                vtable.inner.created_directories.append('\n') catch bun.outOfMemory();
+                            }
+                            return;
+                        }
+                    };
                 };
 
                 const Opts = struct {
