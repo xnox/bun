@@ -798,6 +798,11 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
             fn uvStreamReadCallback(handle: *uv.uv_handle_t, nread: isize, buffer: *const uv.uv_buf_t) callconv(.C) void {
                 log("uvStreamReadCallback nread={d}", .{nread});
                 const this: *BufferedOutput = @ptrCast(@alignCast(handle.data));
+                defer {
+                    if (this.status == .err or this.status == .done) {
+                        this.signalDoneToCmd();
+                    }
+                }
                 if (nread <= 0) {
                     switch (nread) {
                         0 => {
@@ -1014,6 +1019,12 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                 }
             }
 
+            fn uvClosedCallback(handler: *anyopaque) callconv(.C) void {
+                const event = bun.cast(*uv.uv_pipe_t, handler);
+                var this = bun.cast(*BufferedOutput, event.data);
+                this.readable_stream_ref.deinit();
+            }
+
             pub fn close(this: *BufferedOutput) void {
                 log("BufferedOutput close", .{});
                 switch (this.status) {
@@ -1021,8 +1032,11 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                     .pending => {
                         if (Environment.isWindows) {
                             _ = uv.uv_read_stop(@ptrCast(&this.stream));
-                            _ = uv.uv_close(@ptrCast(&this.stream), null);
-                            this.readable_stream_ref.deinit();
+                            if (uv.uv_is_closed(@ptrCast(&this.stream))) {
+                                this.readable_stream_ref.deinit();
+                            } else {
+                                _ = uv.uv_close(@ptrCast(&this.stream), uvClosedCallback);
+                            }
                         } else {
                             this.stream.close();
                         }
