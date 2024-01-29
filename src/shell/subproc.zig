@@ -605,6 +605,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
             /// for example an array buffer. In that case we shouldn't dealloc
             /// memory and let the GC do it.
             from_jsc: bool = false,
+            jsc_buf: if (Environment.isWindows) bun.ByteList else u0 = if (Environment.isWindows) .{} else 0,
             status: Status = .{
                 .pending = {},
             },
@@ -676,9 +677,11 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
             }
 
             pub fn initWithArrayBuffer(subproc: *Subprocess, out: *BufferedOutput, comptime out_type: OutKind, stream_input: StreamInput, array_buf: JSC.ArrayBuffer.Strong) void {
-                if (Environment.isWindows) @panic("FIXME!");
                 out.* = BufferedOutput.initWithSlice(subproc, out_type, stream_input, array_buf.slice());
                 out.from_jsc = true;
+                if (Environment.isWindows) {
+                    return;
+                }
                 out.stream.view = array_buf.held;
                 out.stream.buf = out.internal_buffer.ptr[0..out.internal_buffer.cap];
             }
@@ -866,7 +869,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
             }
 
             fn flushBufferedDataIntoReadableStream(this: *BufferedOutput) void {
-                if (this.writer != null) {
+                if (this.writer != null and !this.writer.?.writing) {
                     this.writer.?.writeIfPossible(false);
                 }
                 if (this.readable_stream_ref.get()) |readable| {

@@ -9138,11 +9138,12 @@ pub fn NewBufferedPipeWriter(comptime Src: type, comptime Parent: type, comptime
         poll_ref: ?*bun.Async.FilePoll = null,
         written: usize = 0,
         parent: Parent,
-        started: bool = true,
+        started: bool = false,
+        writing: bool = false,
         err: ?Syscall.Error = null,
-        count: usize = 0,
 
         pub fn isDone(this: *@This()) bool {
+            log("is_done 0x{x} handlerDone={any} errnull={any}", .{ @intFromPtr(this), SrcHandler.isDone(this.src, this.written), this.err != null });
             return SrcHandler.isDone(this.src, this.written) or this.err != null;
         }
 
@@ -9164,23 +9165,25 @@ pub fn NewBufferedPipeWriter(comptime Src: type, comptime Parent: type, comptime
 
         pub fn uvFsCallback(req: *uv.fs_t) callconv(.C) void {
             const this = bun.cast(*@This(), req.data);
-            this.count -= 1;
             if (req.result.errEnum()) |e| {
-                log("uv_fs_write() fail: {s}", .{@tagName(e)});
+                log("0x{x} uv_fs_write() fail: {s}", .{ @intFromPtr(this), @tagName(e) });
                 this.err = Syscall.Error.fromCode(e, .write);
                 this.deinit();
                 return;
             }
             const written: u32 = @intCast(req.result.value);
-            log("uv_fs_write({d})", .{written});
+            log("0x{x} uv_fs_write({d})", .{ @intFromPtr(this), written });
 
             this.written += written;
             const to_write = SrcHandler.bufToWrite(this.src, this.written);
             if (to_write.len == 0) {
+                defer this.writing = false;
                 if (SrcHandler.isDone(this.src, this.written)) {
                     this.deinit();
                     return;
                 }
+            } else {
+                this.writeAllowBlocking(false);
             }
         }
 
@@ -9192,7 +9195,7 @@ pub fn NewBufferedPipeWriter(comptime Src: type, comptime Parent: type, comptime
             _ = allow_blocking; // autofix
 
             const to_write = SrcHandler.bufToWrite(this.src, this.written);
-            log("writeAllowBlocking({d})", .{to_write.len});
+            log("0x{x} writeAllowBlocking({d})", .{ @intFromPtr(this), to_write.len });
             if (to_write.len == 0) {
                 if (!this.started and SrcHandler.isDone(this.src, this.written)) {
                     this.deinit();
@@ -9208,8 +9211,8 @@ pub fn NewBufferedPipeWriter(comptime Src: type, comptime Parent: type, comptime
                 this.deinit();
                 return;
             }
-            this.count += 1;
             this.started = true;
+            this.writing = true;
         }
 
         pub fn write(this: *@This()) void {
@@ -9234,10 +9237,9 @@ pub fn NewBufferedPipeWriter(comptime Src: type, comptime Parent: type, comptime
         }
 
         pub fn deinit(this: *@This()) void {
-            if (this.count == 0) {
-                this.close();
-                this.parent.onDone(this.err);
-            }
+            log("deinit bufferedoutput(0x{x})", .{@intFromPtr(this)});
+            this.close();
+            this.parent.onDone(this.err);
         }
     };
 }
