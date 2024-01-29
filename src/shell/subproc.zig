@@ -393,7 +393,8 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
 
             pub const Pipe = union(enum) {
                 stream: JSC.WebCore.ReadableStream,
-                buffer: BufferedOutput,
+                buffer: BufferedOutputT,
+                const BufferedOutputT = if (bun.Environment.isWindows) *BufferedOutput else BufferedOutput;
 
                 pub fn finish(this: *@This()) void {
                     if (this.* == .stream and this.stream.ptr == .File) {
@@ -435,23 +436,23 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                 return switch (stdio) {
                     .ignore => Readable{ .ignore = {} },
                     .pipe => {
-                        var subproc_readable_ptr = subproc.getIO(kind);
-                        subproc_readable_ptr.* = Readable{ .pipe = .{ .buffer = undefined } };
-                        BufferedOutput.initWithAllocator(subproc, &subproc_readable_ptr.pipe.buffer, kind, allocator, stream_input, max_size);
+                        const subproc_readable_ptr = subproc.getIO(kind);
+                        subproc_readable_ptr.* = Readable{ .pipe = .{ .buffer = if (Environment.isWindows) bun.default_allocator.create(BufferedOutput) catch bun.outOfMemory() else undefined } };
+                        BufferedOutput.initWithAllocator(subproc, if (Environment.isWindows) subproc_readable_ptr.pipe.buffer else &subproc_readable_ptr.pipe.buffer, kind, allocator, stream_input, max_size);
                         return subproc_readable_ptr.*;
                     },
                     .inherit => {
                         // Same as pipe
                         if (stdio.inherit.captured != null) {
-                            var subproc_readable_ptr = subproc.getIO(kind);
-                            subproc_readable_ptr.* = Readable{ .pipe = .{ .buffer = undefined } };
-                            BufferedOutput.initWithAllocator(subproc, &subproc_readable_ptr.pipe.buffer, kind, allocator, stream_input, max_size);
+                            const subproc_readable_ptr = subproc.getIO(kind);
+                            subproc_readable_ptr.* = Readable{ .pipe = .{ .buffer = if (Environment.isWindows) bun.default_allocator.create(BufferedOutput) catch bun.outOfMemory() else undefined } };
+                            BufferedOutput.initWithAllocator(subproc, if (Environment.isWindows) subproc_readable_ptr.pipe.buffer else &subproc_readable_ptr.pipe.buffer, kind, allocator, stream_input, max_size);
                             subproc_readable_ptr.pipe.buffer.out = stdio.inherit.captured.?;
                             const fd = if (kind == .stdout) shell.STDOUT_FD else shell.STDERR_FD;
                             subproc_readable_ptr.pipe.buffer.writer = switch (BufferedOutput.CapturedBufferedWriter.init(
                                 fd,
-                                BufferedOutput.WriterSrc{ .inner = &subproc_readable_ptr.pipe.buffer },
-                                .{ .parent = &subproc_readable_ptr.pipe.buffer },
+                                BufferedOutput.WriterSrc{ .inner = if (Environment.isWindows) subproc_readable_ptr.pipe.buffer else &subproc_readable_ptr.pipe.buffer },
+                                .{ .parent = if (Environment.isWindows) subproc_readable_ptr.pipe.buffer else &subproc_readable_ptr.pipe.buffer },
                             )) {
                                 .result => |bw| bw,
                                 .err => @panic("FIXME"),
@@ -469,16 +470,20 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                         return Readable{ .fd = stream_input };
                     },
                     .array_buffer => {
-                        var subproc_readable_ptr = subproc.getIO(kind);
+                        const subproc_readable_ptr = subproc.getIO(kind);
                         subproc_readable_ptr.* = Readable{
                             .pipe = .{
-                                .buffer = undefined,
+                                .buffer = if (Environment.isWindows) bun.default_allocator.create(BufferedOutput) catch bun.outOfMemory() else undefined,
                             },
                         };
                         if (stdio.array_buffer.from_jsc) {
-                            BufferedOutput.initWithArrayBuffer(subproc, &subproc_readable_ptr.pipe.buffer, kind, stream_input, stdio.array_buffer.buf);
+                            BufferedOutput.initWithArrayBuffer(subproc, if (Environment.isWindows) subproc_readable_ptr.pipe.buffer else &subproc_readable_ptr.pipe.buffer, kind, stream_input, stdio.array_buffer.buf);
                         } else {
-                            subproc_readable_ptr.pipe.buffer = BufferedOutput.initWithSlice(subproc, kind, stream_input, stdio.array_buffer.buf.slice());
+                            if (Environment.isWindows) {
+                                subproc_readable_ptr.pipe.buffer.* = BufferedOutput.initWithSlice(subproc, kind, stream_input, stdio.array_buffer.buf.slice());
+                            } else {
+                                subproc_readable_ptr.pipe.buffer = BufferedOutput.initWithSlice(subproc, kind, stream_input, stdio.array_buffer.buf.slice());
+                            }
                         }
                         return subproc_readable_ptr.*;
                     },
@@ -1023,13 +1028,20 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                 const event = bun.cast(*uv.uv_pipe_t, handler);
                 var this = bun.cast(*BufferedOutput, event.data);
                 this.readable_stream_ref.deinit();
+                bun.default_allocator.destroy(this);
             }
 
             pub fn close(this: *BufferedOutput) void {
-                log("BufferedOutput close", .{});
+                log("[BufferedOutput] close", .{});
+
+                if (this.internal_buffer.cap > 0 and !this.from_jsc) {
+                    this.internal_buffer.listManaged(bun.default_allocator).deinit();
+                    this.internal_buffer = .{};
+                }
+
                 switch (this.status) {
-                    .done => {},
-                    .pending => {
+                    //  => {},
+                    .done, .pending => {
                         if (Environment.isWindows) {
                             _ = uv.uv_read_stop(@ptrCast(&this.stream));
                             if (uv.uv_is_closed(@ptrCast(&this.stream))) {
@@ -1037,17 +1049,14 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                             } else {
                                 _ = uv.uv_close(@ptrCast(&this.stream), uvClosedCallback);
                             }
+                            this.status = .{ .done = {} };
                         } else {
                             this.stream.close();
+                            this.status = .{ .done = {} };
+                            // bun.default_allocator.destroy(this);
                         }
-                        this.status = .{ .done = {} };
                     },
                     .err => {},
-                }
-
-                if (this.internal_buffer.cap > 0 and !this.from_jsc) {
-                    this.internal_buffer.listManaged(bun.default_allocator).deinit();
-                    this.internal_buffer = .{};
                 }
             }
         };
