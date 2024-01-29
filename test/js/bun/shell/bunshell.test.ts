@@ -16,6 +16,8 @@ import { TestBuilder } from "./util";
 $.env(bunEnv);
 $.cwd(process.cwd());
 
+const MAX_ENV_SIZE = process.platform === 'win32' ? 32768 : 8192;
+
 let temp_dir: string;
 const temp_files = ["foo.txt", "lmao.ts"];
 beforeAll(async () => {
@@ -331,8 +333,8 @@ describe("bunshell", () => {
     });
 
     test("export var", async () => {
-      const buffer = Buffer.alloc(32768);
-      const buffer2 = Buffer.alloc(32768);
+      const buffer = Buffer.alloc(MAX_ENV_SIZE);
+      const buffer2 = Buffer.alloc(MAX_ENV_SIZE);
       await $`export FOO=bar && BAZ=1 ${BUN} -e "console.log(JSON.stringify(process.env))" > ${buffer} && BUN_TEST_VAR=1 ${BUN} -e "console.log(JSON.stringify(process.env))" > ${buffer2}`;
 
       const str1 = stringifyBuffer(buffer);
@@ -347,7 +349,7 @@ describe("bunshell", () => {
     });
 
     test("syntax edgecase", async () => {
-      const buffer = new Uint8Array(8192);
+      const buffer = new Uint8Array(MAX_ENV_SIZE);
       const shellProc = await $`FOO=bar BUN_TEST_VAR=1 ${BUN} -e "console.log(JSON.stringify(process.env))"> ${buffer}`;
 
       const str = stringifyBuffer(buffer);
