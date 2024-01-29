@@ -8423,6 +8423,8 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             poll_ref: ?*bun.Async.FilePoll = null,
             written: usize = 0,
 
+            started: bool = false,
+            writing: bool = false,
             parent: ParentPtr,
             err: ?Syscall.Error = null,
             bytelist: ?*bun.ByteList = null,
@@ -8455,15 +8457,15 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
             pub fn uvFsCallback(req: *uv.fs_t) callconv(.C) void {
                 const this = bun.cast(*BufferedPipeWriter, req.data);
-                defer uv.uv_fs_req_cleanup(&this.write_req);
+                // defer uv.uv_fs_req_cleanup(&this.write_req);
                 if (req.result.errEnum()) |e| {
-                    log("uv_fs_write({d}) fail: {s}", .{ this.remain.len, @tagName(e) });
+                    log("BufferedPipeWriter.uv_fs_write({d}) fail: {s}", .{ this.remain.len, @tagName(e) });
                     this.err = Syscall.Error.fromCode(e, .write);
                     this.deinit();
                     return;
                 }
 
-                log("uv_fs_write({d})", .{this.remain.len});
+                log("BufferedPipeWriter.uv_fs_write({d})", .{this.remain.len});
                 if (this.bytelist) |blist| {
                     blist.append(bun.default_allocator, this.remain[0..]) catch bun.outOfMemory();
                 }
@@ -8480,13 +8482,19 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             pub fn writeAllowBlocking(this: *BufferedPipeWriter, allow_blocking: bool) void {
                 _ = allow_blocking; // autofix
 
+                if (this.writing) return;
+
+                log("0x{x} BufferedPipeWriter.writeAllowBlocking({d}, \"{s}[..]\")", .{ @intFromPtr(this), this.remain.len, this.remain[0..@min(16, this.remain.len)] });
                 this.write_req.data = @ptrCast(this);
                 this.input_buffer = uv.uv_buf_t.init(this.remain);
                 const ret = uv.uv_fs_write(uv.Loop.get(), &this.write_req, bun.uvfdcast(this.fd), @ptrCast(&this.input_buffer), 1, 0, uvFsCallback);
                 if (ret.errEnum()) |e| {
                     this.err = Syscall.Error.fromCode(e, .write);
                     this.deinit();
+                    return;
                 }
+                this.started = true;
+                this.writing = true;
             }
 
             pub fn write(this: *BufferedPipeWriter) void {
@@ -8499,6 +8507,10 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     poll.deinit();
                 }
 
+                if (this.started) {
+                    uv.uv_fs_req_cleanup(&this.write_req);
+                }
+
                 // if (this.fd != bun.invalid_fd) {
                 //     if (bun.FDImpl.decode(this.fd).close()) |e| {
                 //         bun.Output.debugWarn("closing uvfd failed: {anytype}", .{e});
@@ -8507,6 +8519,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             }
 
             pub fn deinit(this: *BufferedPipeWriter) void {
+                log("BufferedPipeWriter.deinit (0x{x})", .{@intFromPtr(this)});
                 this.close();
                 this.parent.onDone(this.err);
             }

@@ -789,6 +789,9 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                             std.debug.assert(this.internal_buffer.contains(slice));
 
                         if (this.writer != null) {
+                            // Calling writeIfPossible is idempotent because it
+                            // uses FIFO .watch() so calling this multiple times
+                            // won't cause multiple writes
                             this.writer.?.writeIfPossible(false);
                         }
 
