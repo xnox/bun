@@ -9192,7 +9192,7 @@ pub fn NewBufferedPipeWriter(comptime Src: type, comptime Parent: type, comptime
             const to_write = SrcHandler.bufToWrite(this.src, this.written);
             log("writeAllowBlocking({d})", .{to_write.len});
             if (to_write.len == 0) {
-                if (SrcHandler.isDone(this.src, this.written)) {
+                if (!this.started and SrcHandler.isDone(this.src, this.written)) {
                     this.deinit();
                 }
                 return;

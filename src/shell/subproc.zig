@@ -1025,6 +1025,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
             }
 
             fn uvClosedCallback(handler: *anyopaque) callconv(.C) void {
+                log("uvClosedCallback", .{});
                 const event = bun.cast(*uv.uv_pipe_t, handler);
                 var this = bun.cast(*BufferedOutput, event.data);
                 this.readable_stream_ref.deinit();
@@ -1047,7 +1048,7 @@ pub fn NewShellSubprocess(comptime EventLoopKind: JSC.EventLoopKind, comptime Sh
                             if (uv.uv_is_closed(@ptrCast(&this.stream))) {
                                 this.readable_stream_ref.deinit();
                             } else {
-                                _ = uv.uv_close(@ptrCast(&this.stream), uvClosedCallback);
+                                // uv.uv_close(@ptrCast(&this.stream), uvClosedCallback);
                             }
                             this.status = .{ .done = {} };
                         } else {
