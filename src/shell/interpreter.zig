@@ -9140,6 +9140,7 @@ pub fn NewBufferedPipeWriter(comptime Src: type, comptime Parent: type, comptime
         parent: Parent,
         started: bool = true,
         err: ?Syscall.Error = null,
+        count: usize = 0,
 
         pub fn isDone(this: *@This()) bool {
             return SrcHandler.isDone(this.src, this.written) or this.err != null;
@@ -9163,6 +9164,7 @@ pub fn NewBufferedPipeWriter(comptime Src: type, comptime Parent: type, comptime
 
         pub fn uvFsCallback(req: *uv.fs_t) callconv(.C) void {
             const this = bun.cast(*@This(), req.data);
+            this.count -= 1;
             if (req.result.errEnum()) |e| {
                 log("uv_fs_write() fail: {s}", .{@tagName(e)});
                 this.err = Syscall.Error.fromCode(e, .write);
@@ -9206,6 +9208,7 @@ pub fn NewBufferedPipeWriter(comptime Src: type, comptime Parent: type, comptime
                 this.deinit();
                 return;
             }
+            this.count += 1;
             this.started = true;
         }
 
@@ -9231,8 +9234,10 @@ pub fn NewBufferedPipeWriter(comptime Src: type, comptime Parent: type, comptime
         }
 
         pub fn deinit(this: *@This()) void {
-            this.close();
-            this.parent.onDone(this.err);
+            if (this.count == 0) {
+                this.close();
+                this.parent.onDone(this.err);
+            }
         }
     };
 }

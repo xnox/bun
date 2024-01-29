@@ -7,7 +7,7 @@
  */
 import { $ } from "bun";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm } from "fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "fs/promises";
 import { bunEnv, runWithErrorPromise, tempDirWithFiles } from "harness";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -23,9 +23,11 @@ beforeAll(async () => {
   await mkdir(temp_dir, { recursive: true });
 
   for (const file of temp_files) {
-    const writer = Bun.file(join(temp_dir, file)).writer();
-    writer.write("foo");
-    writer.end();
+    
+    await writeFile(join(temp_dir, file), "foo");
+    // const writer = Bun.file(join(temp_dir, file)).writer();
+    // writer.write("foo");
+    // writer.end();
   }
 });
 
