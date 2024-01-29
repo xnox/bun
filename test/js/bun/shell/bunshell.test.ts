@@ -331,8 +331,8 @@ describe("bunshell", () => {
     });
 
     test("export var", async () => {
-      const buffer = Buffer.alloc(8192);
-      const buffer2 = Buffer.alloc(8192);
+      const buffer = Buffer.alloc(32768);
+      const buffer2 = Buffer.alloc(32768);
       await $`export FOO=bar && BAZ=1 ${BUN} -e "console.log(JSON.stringify(process.env))" > ${buffer} && BUN_TEST_VAR=1 ${BUN} -e "console.log(JSON.stringify(process.env))" > ${buffer2}`;
 
       const str1 = stringifyBuffer(buffer);
