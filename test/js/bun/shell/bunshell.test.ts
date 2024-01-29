@@ -413,11 +413,11 @@ describe("bunshell", () => {
           .filter(s => s.length !== 0)
           .sort(),
       ).toEqual(
-        `${temp_dir}/foo
-${temp_dir}/dir/files
-${temp_dir}/dir/some
-${temp_dir}/dir
-${temp_dir}/bar
+        `${join(temp_dir,'foo')}
+${join(temp_dir,'dir','files')}
+${join(temp_dir,'dir','some')}
+${join(temp_dir,"dir")}
+${join(temp_dir,'bar')}
 ${temp_dir}`
           .split("\n")
           .sort(),
