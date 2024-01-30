@@ -5,9 +5,9 @@
  *
  * This code is licensed under the MIT License: https://opensource.org/licenses/MIT
  */
-import { $ } from "bun";
+import { $, ShellOutput } from "bun";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile, readFile } from "fs/promises";
 import { bunEnv, runWithErrorPromise, tempDirWithFiles } from "harness";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -219,18 +219,18 @@ describe("bunshell", () => {
     const result = await $`cat ${import.meta.path} > ${buffer}`;
 
     const sentinel = sentinelByte(buffer);
-    const thisFile = Bun.file(import.meta.path);
-
-    expect(new TextDecoder().decode(buffer.slice(0, sentinel))).toEqual(await thisFile.text());
+    const thisFileText = (await readFile(import.meta.path, 'utf8'));
+    const output = new TextDecoder().decode(buffer.slice(0, sentinel)).replaceAll('\r', ''); 
+    expect(output).toEqual(thisFileText);
   });
 
   test("redirect Buffer", async () => {
     const buffer = Buffer.alloc(1 << 20);
     const result = await $`cat ${import.meta.path} > ${buffer}`;
 
-    const thisFile = Bun.file(import.meta.path);
+    const thisFileText = (await readFile(import.meta.path, "utf8"));
 
-    expect(new TextDecoder().decode(buffer.slice(0, sentinelByte(buffer)))).toEqual(await thisFile.text());
+    expect(new TextDecoder().decode(buffer.slice(0, sentinelByte(buffer))).replaceAll('\r', '')).toEqual(thisFileText);
   });
 
   test("redirect Bun.File", async () => {
