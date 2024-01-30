@@ -3619,6 +3619,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             cwd: bun.FileDescriptor,
 
             impl: union(Kind) {
+                cat: Cat,
                 touch: Touch,
                 mkdir: Mkdir,
                 @"export": Export,
@@ -3634,6 +3635,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             const Result = @import("../result.zig").Result;
 
             pub const Kind = enum {
+                cat,
                 touch,
                 mkdir,
                 @"export",
@@ -3651,6 +3653,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                 pub fn usageString(this: Kind) []const u8 {
                     return switch (this) {
+                        .cat => "usage: cat [-belnstuv] [file ...]\n",
                         .touch => "usage: touch [-A [-][[hh]mm]SS] [-achm] [-r file] [-t [[CC]YY]MMDDhhmm[.SS]]\n       [-d YYYY-MM-DDThh:mm:SS[.frac][tz]] file ...",
                         .mkdir => "usage: mkdir [-pv] [-m mode] directory_name ...\n",
                         .@"export" => "",
@@ -3669,7 +3672,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 }
 
                 pub fn fromStr(str: []const u8) ?Builtin.Kind {
-                    @setEvalBranchQuota(2000);
+                    @setEvalBranchQuota(5000);
                     const tyinfo = @typeInfo(Builtin.Kind);
                     inline for (tyinfo.Enum.fields) |field| {
                         if (bun.strings.eqlComptime(str, field.name)) {
@@ -3778,6 +3781,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
             pub inline fn callImpl(this: *Builtin, comptime Ret: type, comptime field: []const u8, args_: anytype) Ret {
                 return switch (this.kind) {
+                    .cat => this.callImplWithType(Cat, Ret, "cat", field, args_),
                     .touch => this.callImplWithType(Touch, Ret, "touch", field, args_),
                     .mkdir => this.callImplWithType(Mkdir, Ret, "mkdir", field, args_),
                     .@"export" => this.callImplWithType(Export, Ret, "export", field, args_),
@@ -3863,6 +3867,11 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 };
 
                 switch (kind) {
+                    .cat => {
+                        cmd.exec.bltn.impl = .{
+                            .cat = Cat{ .bltn = &cmd.exec.bltn },
+                        };
+                    },
                     .touch => {
                         cmd.exec.bltn.impl = .{
                             .touch = Touch{ .bltn = &cmd.exec.bltn },
@@ -4100,6 +4109,15 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 return switch (io.*) {
                     .captured => if (comptime io_kind == .stdout) this.parentCmd().base.shell.buffered_stdout() else this.parentCmd().base.shell.buffered_stderr(),
                     else => null,
+                };
+            }
+
+            pub fn readStdinNoIO(this: *Builtin) []const u8 {
+                return switch (this.stdin) {
+                    .arraybuf => |buf| buf.buf.slice(),
+                    .buf => |buf| buf.items[0..],
+                    .blob => |blob| blob.sharedView(),
+                    else => "",
                 };
             }
 
@@ -4405,6 +4423,462 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     log("({s}) deinit", .{@tagName(.echo)});
                     _ = this;
                 }
+            };
+
+            pub const Cat = struct {
+                const print = bun.Output.scoped(.ShellCat, false);
+                bltn: *Builtin,
+                opts: Opts = .{},
+                stdinbuf: ?[]u8 = null,
+                stdoutbuf: ?[]u8 = null,
+                state: union(enum) {
+                    idle,
+                    exec_stdin: struct {
+                        stdin_done: bool = false,
+                        stdout_done: bool = false,
+                        reader: ?BufferedUVReader = null,
+                        writer: ?BufferedWriter = null,
+                        errno: ?ExitCode = null,
+                    },
+                    exec_filepath_args: struct {
+                        args: []const [*:0]const u8,
+                        cur_fd: bun.FileDescriptor = bun.invalid_fd,
+                        idx: usize = 0,
+                        reader: ?BufferedUVReader = null,
+                        writer: ?BufferedWriter = null,
+                        read_done: bool = false,
+                        errno: ?ExitCode = null,
+                    },
+                    waiting_write_err: BufferedWriter,
+                    done,
+                } = .idle,
+                // ~128kbb
+                const STREAMED_BLOCK_SIZE = 1024 * 128;
+
+                // const CatBufferedWriter = if (bun.Environment.isWindows)
+
+                pub fn deinit(this: *Cat) void {
+                    if (this.stdinbuf) |buf| {
+                        bun.default_allocator.free(buf);
+                    }
+                    if (this.stdoutbuf) |buf| {
+                        bun.default_allocator.free(buf);
+                    }
+                }
+
+                pub fn start(this: *Cat) Maybe(void) {
+                    const filepath_args = switch (this.opts.parse(this.bltn.argsSlice())) {
+                        .ok => |filepath_args| filepath_args,
+                        .err => |e| {
+                            const buf = switch (e) {
+                                .illegal_option => |opt_str| this.bltn.fmtErrorArena(.cat, "illegal option -- {s}\n", .{opt_str}),
+                                .show_usage => Builtin.Kind.cat.usageString(),
+                                .unsupported => |unsupported| this.bltn.fmtErrorArena(.cat, "unsupported option, please open a GitHub issue -- {s}\n", .{unsupported}),
+                            };
+
+                            _ = this.writeFailingError(buf, 1);
+                            return Maybe(void).success;
+                        },
+                    };
+
+                    const should_read_from_stdin = filepath_args == null or filepath_args.?.len == 0;
+
+                    if (should_read_from_stdin) {
+                        this.stdinbuf = bun.default_allocator.alloc(u8, STREAMED_BLOCK_SIZE) catch bun.outOfMemory();
+                        this.stdoutbuf = bun.default_allocator.alloc(u8, STREAMED_BLOCK_SIZE) catch bun.outOfMemory();
+                        this.state = .{
+                            .exec_stdin = .{},
+                        };
+                    } else {
+                        this.state = .{
+                            .exec_filepath_args = .{
+                                .args = filepath_args.?,
+                                .writer = null,
+                                .reader = null,
+                            },
+                        };
+                    }
+
+                    _ = this.next();
+
+                    return Maybe(void).success;
+                }
+
+                pub fn next(this: *Cat) void {
+                    switch (this.state) {
+                        .idle => @panic("Invalid state"),
+                        .exec_filepath_args => {
+                            var exec = &this.state.exec_filepath_args;
+                            if (exec.idx >= exec.args.len) {
+                                return this.bltn.done(0);
+                            }
+                            const arg = std.mem.span(exec.args[exec.idx]);
+                            exec.idx += 1;
+                            const dir = this.bltn.parentCmd().base.shell.cwd_fd;
+                            const fd = switch (ShellSyscall.openat(dir, arg, os.O.RDONLY, 0)) {
+                                .result => |fd| fd,
+                                .err => |e| {
+                                    const buf = this.bltn.taskErrorToString(.cat, e);
+                                    _ = this.writeFailingError(buf, 1);
+                                    return;
+                                },
+                            };
+                            if (this.stdinbuf == null) {
+                                this.stdinbuf = bun.default_allocator.alloc(u8, STREAMED_BLOCK_SIZE) catch bun.outOfMemory();
+                            }
+                            exec.reader = BufferedUVReader{
+                                .fd = fd,
+                                .buf = .{
+                                    .ptr = this.stdinbuf.?.ptr,
+                                    .len = 0,
+                                    .cap = @intCast(this.stdinbuf.?.len),
+                                },
+                                .parent = BufferedReaderParentPtr.init(this),
+                            };
+                            exec.reader.?.readIfPossible();
+                        },
+                        .exec_stdin => {
+                            if (!this.bltn.stdin.needsIO()) {
+                                const buf = this.bltn.readStdinNoIO();
+                                if (!this.bltn.stdout.needsIO()) {
+                                    if (this.bltn.writeNoIO(.stdout, buf).asErr()) |e| {
+                                        _ = this.writeFailingError(this.bltn.taskErrorToString(.cat, e), 1);
+                                        return;
+                                    }
+                                    return;
+                                }
+                                this.state.exec_stdin.writer = switch (BufferedWriter.init(
+                                    this.bltn.stdout.expectFd(),
+                                    buf,
+                                    BufferedWriterParentPtr.init(this),
+                                    this.bltn.stdBufferedBytelist(.stderr),
+                                )) {
+                                    .result => |bw| bw,
+                                    .err => |e| {
+                                        _ = this.writeFailingError(this.bltn.taskErrorToString(.cat, e), 1);
+                                        return;
+                                    },
+                                };
+                                this.state.exec_stdin.writer.?.writeIfPossible(false);
+                                return;
+                            }
+
+                            this.state.exec_stdin.reader = BufferedUVReader{
+                                .fd = this.bltn.stdin.expectFd(),
+                                .buf = .{
+                                    .ptr = this.stdinbuf.?.ptr,
+                                    .len = 0,
+                                    .cap = @intCast(this.stdinbuf.?.len),
+                                },
+                                .parent = BufferedReaderParentPtr.init(this),
+                            };
+                            this.state.exec_stdin.reader.?.readIfPossible();
+                        },
+                        .waiting_write_err => return,
+                        .done => this.bltn.done(0),
+                    }
+                }
+
+                pub fn onBufferedWriterDone(this: *Cat, e: ?Syscall.Error) void {
+                    print("onBufferedWriterDone", .{});
+                    if (e) |err| {
+                        switch (this.state) {
+                            .exec_stdin => {
+                                if (this.state.exec_stdin.stdin_done) {
+                                    this.bltn.done(err.errno);
+                                    return;
+                                }
+                                this.state.exec_stdin.errno = e.?.errno;
+                            },
+                            .exec_filepath_args => {
+                                if (this.state.exec_filepath_args.read_done) {
+                                    this.bltn.done(err.errno);
+                                    return;
+                                }
+                                this.state.exec_filepath_args.errno = e.?.errno;
+                            },
+                            .waiting_write_err => {
+                                this.bltn.done(1);
+                            },
+                            else => @panic("Invalid state"),
+                        }
+                    }
+
+                    switch (this.state) {
+                        .exec_stdin => {
+                            this.state.exec_stdin.writer = null;
+                            if (this.state.exec_stdin.stdin_done) {
+                                this.bltn.done(this.state.exec_stdin.errno orelse 0);
+                                return;
+                            }
+                            if (this.state.exec_stdin.reader) |*r| {
+                                r.readIfPossible();
+                            }
+                        },
+                        .exec_filepath_args => {
+                            this.state.exec_filepath_args.writer = null;
+                            if (this.state.exec_filepath_args.read_done) {
+                                this.next();
+                                return;
+                            }
+                            if (this.state.exec_filepath_args.reader) |*r| {
+                                r.readIfPossible();
+                            }
+                        },
+                        .waiting_write_err => {
+                            this.bltn.done(1);
+                        },
+                        else => @panic("Invalid state"),
+                    }
+                }
+
+                pub fn onBufferedReaderDeinit(this: *Cat, e: ?Syscall.Error) void {
+                    print("onBufferedReaderDeinit", .{});
+                    if (e) |err| {
+                        switch (this.state) {
+                            .exec_stdin => {
+                                if (this.state.exec_stdin.writer == null) {
+                                    this.bltn.done(err.errno);
+                                    return;
+                                }
+                                this.state.exec_stdin.errno = err.errno;
+                            },
+                            .exec_filepath_args => {
+                                if (this.state.exec_filepath_args.writer == null) {
+                                    this.bltn.done(err.errno);
+                                    return;
+                                }
+                                this.state.exec_filepath_args.errno = err.errno;
+                            },
+                            .waiting_write_err => {
+                                this.bltn.done(1);
+                            },
+                            else => {},
+                        }
+                    }
+
+                    switch (this.state) {
+                        .exec_stdin => {
+                            this.state.exec_stdin.stdin_done = true;
+                            if (this.state.exec_stdin.writer == null) {
+                                this.bltn.done(this.state.exec_stdin.errno orelse 0);
+                            }
+                        },
+                        .exec_filepath_args => {
+                            this.state.exec_filepath_args.read_done = true;
+                            if (this.state.exec_filepath_args.writer == null) {
+                                this.next();
+                            }
+                        },
+                        else => {},
+                    }
+                }
+
+                pub fn onBufferedReaderRead(this: *Cat, buf: []const u8, e: ?Syscall.Error) BufferedReadAction {
+                    print("onBufferedReaderRead", .{});
+                    if (e) |err| {
+                        switch (this.state) {
+                            .exec_stdin => {
+                                if (this.state.exec_stdin.writer == null) {
+                                    this.bltn.done(err.errno);
+                                    return .done;
+                                }
+                                this.state.exec_stdin.errno = err.errno;
+                            },
+                            .exec_filepath_args => {
+                                if (this.state.exec_filepath_args.writer == null) {
+                                    this.bltn.done(err.errno);
+                                    return .done;
+                                }
+                                this.state.exec_filepath_args.errno = err.errno;
+                            },
+                            .waiting_write_err => {
+                                this.bltn.done(1);
+                            },
+                            else => {},
+                        }
+                        return .done;
+                    }
+
+                    switch (this.state) {
+                        .exec_stdin => {
+                            if (!this.bltn.stdout.needsIO()) {
+                                if (this.bltn.writeNoIO(.stdout, buf).asErr()) |err| {
+                                    _ = err; // autofix
+
+                                    return .done;
+                                }
+                                return .cont;
+                            }
+
+                            const writer: *BufferedWriter = brk: {
+                                if (this.state.exec_stdin.writer) |*w| break :brk w;
+                                this.state.exec_stdin.writer = switch (BufferedWriter.init(
+                                    this.bltn.stdout.expectFd(),
+                                    this.stdoutbuf.?[0..0],
+                                    BufferedWriterParentPtr.init(this),
+                                    this.bltn.stdBufferedBytelist(.stdout),
+                                )) {
+                                    .result => |bw| bw,
+                                    .err => |err| {
+                                        _ = this.writeFailingError(this.bltn.taskErrorToString(.cat, err), 1);
+                                        return .done;
+                                    },
+                                };
+                                break :brk &this.state.exec_stdin.writer.?;
+                            };
+
+                            var outbuf = this.stdoutbuf.?;
+                            @memcpy(outbuf[0..buf.len], buf);
+                            writer.setRemain(outbuf[0..buf.len]);
+                            writer.writeIfPossible(false);
+                            return .wait;
+                        },
+                        .exec_filepath_args => {
+                            if (!this.bltn.stdout.needsIO()) {
+                                if (this.bltn.writeNoIO(.stdout, buf).asErr()) |err| {
+                                    _ = err; // autofix
+
+                                    return .done;
+                                }
+                                return .cont;
+                            }
+
+                            const writer: *BufferedWriter = brk: {
+                                if (this.state.exec_filepath_args.writer) |*w| break :brk w;
+
+                                const stdoutbuf = stdoutbuf: {
+                                    if (this.stdoutbuf) |tbuf| break :stdoutbuf tbuf;
+                                    this.stdoutbuf = bun.default_allocator.alloc(u8, STREAMED_BLOCK_SIZE) catch bun.outOfMemory();
+                                    break :stdoutbuf this.stdoutbuf.?;
+                                };
+
+                                this.state.exec_filepath_args.writer = switch (BufferedWriter.init(
+                                    this.bltn.stdout.expectFd(),
+                                    stdoutbuf[0..0],
+                                    BufferedWriterParentPtr.init(this),
+                                    this.bltn.stdBufferedBytelist(.stdout),
+                                )) {
+                                    .result => |bw| bw,
+                                    .err => |err| {
+                                        _ = this.writeFailingError(this.bltn.taskErrorToString(.cat, err), 1);
+                                        return .done;
+                                    },
+                                };
+                                break :brk &this.state.exec_filepath_args.writer.?;
+                            };
+
+                            var outbuf = this.stdoutbuf.?;
+                            @memcpy(outbuf[0..buf.len], buf);
+                            writer.setRemain(outbuf[0..buf.len]);
+                            writer.writeIfPossible(false);
+                            return .wait;
+                        },
+                        else => {},
+                    }
+
+                    return .cont;
+                }
+
+                pub fn writeFailingError(this: *Cat, buf: []const u8, exit_code: ExitCode) Maybe(void) {
+                    if (this.bltn.stderr.needsIO()) {
+                        const fd = this.bltn.stderr.expectFd();
+                        const bw = switch (BufferedWriter.init(fd, buf, BufferedWriter.ParentPtr.init(this), this.bltn.stdBufferedBytelist(.stderr))) {
+                            .result => |bw| bw,
+                            .err => |e| return .{ .err = e.withFd(fd) },
+                        };
+                        this.state = .{ .waiting_write_err = bw };
+                        this.state.waiting_write_err.writeIfPossible(false);
+                        return Maybe(void).success;
+                    }
+
+                    if (this.bltn.writeNoIO(.stderr, buf).asErr()) |e| {
+                        return .{ .err = e };
+                    }
+
+                    this.bltn.done(exit_code);
+                    return Maybe(void).success;
+                }
+
+                const Opts = struct {
+                    /// -b
+                    ///
+                    /// Number the non-blank output lines, starting at 1.
+                    number_nonblank: bool = false,
+
+                    /// -e
+                    ///
+                    /// Display non-printing characters and display a dollar sign ($) at the end of each line.
+                    show_ends: bool = false,
+
+                    /// -n
+                    ///
+                    /// Number the output lines, starting at 1.
+                    number_all: bool = false,
+
+                    /// -s
+                    ///
+                    /// Squeeze multiple adjacent empty lines, causing the output to be single spaced.
+                    squeeze_blank: bool = false,
+
+                    /// -t
+                    ///
+                    /// Display non-printing characters and display tab characters as ^I at the end of each line.
+                    show_tabs: bool = false,
+
+                    /// -u
+                    ///
+                    /// Disable output buffering.
+                    disable_output_buffering: bool = false,
+
+                    /// -v
+                    ///
+                    /// Displays non-printing characters so they are visible.
+                    show_nonprinting: bool = false,
+
+                    const Parse = FlagParser(*@This());
+
+                    pub fn parse(opts: *Opts, args: []const [*:0]const u8) Result(?[]const [*:0]const u8, ParseError) {
+                        return Parse.parseFlags(opts, args);
+                    }
+
+                    pub fn parseLong(this: *Opts, flag: []const u8) ParseFlagResult {
+                        _ = this; // autofix
+                        return .{ .illegal_option = flag };
+                    }
+
+                    fn parseShort(this: *Opts, char: u8, smallflags: []const u8, i: usize) ?ParseFlagResult {
+                        _ = this; // autofix
+                        switch (char) {
+                            'b' => {
+                                return .{ .unsupported = unsupportedFlag("-b") };
+                            },
+                            'e' => {
+                                return .{ .unsupported = unsupportedFlag("-e") };
+                            },
+                            'n' => {
+                                return .{ .unsupported = unsupportedFlag("-n") };
+                            },
+                            's' => {
+                                return .{ .unsupported = unsupportedFlag("-s") };
+                            },
+                            't' => {
+                                return .{ .unsupported = unsupportedFlag("-t") };
+                            },
+                            'u' => {
+                                return .{ .unsupported = unsupportedFlag("-u") };
+                            },
+                            'v' => {
+                                return .{ .unsupported = unsupportedFlag("-v") };
+                            },
+                            else => {
+                                return .{ .illegal_option = smallflags[1 + i ..] };
+                            },
+                        }
+
+                        return null;
+                    }
+                };
             };
 
             pub const Touch = struct {
@@ -8385,6 +8859,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
         pub const BufferedWriterParentPtr = struct {
             const Types = .{
+                BuiltinJs.Cat,
                 BuiltinJs.Touch,
                 BuiltinJs.Mkdir,
                 BuiltinJs.Export,
@@ -8395,6 +8870,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 BuiltinJs.Pwd,
                 BuiltinJs.Mv,
                 BuiltinJs.Ls,
+                BuiltinMini.Cat,
                 BuiltinMini.Touch,
                 BuiltinMini.Mkdir,
                 BuiltinMini.Export,
@@ -8434,6 +8910,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             }
 
             pub fn onDone(this: ParentPtr, e: ?Syscall.Error) void {
+                if (this.ptr.is(BuiltinJs.Cat)) return this.ptr.as(BuiltinJs.Cat).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Touch)) return this.ptr.as(BuiltinJs.Touch).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Mkdir)) return this.ptr.as(BuiltinJs.Mkdir).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Export)) return this.ptr.as(BuiltinJs.Export).onBufferedWriterDone(e);
@@ -8444,6 +8921,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 if (this.ptr.is(BuiltinJs.Pwd)) return this.ptr.as(BuiltinJs.Pwd).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Mv)) return this.ptr.as(BuiltinJs.Mv).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Ls)) return this.ptr.as(BuiltinJs.Ls).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinMini.Cat)) return this.ptr.as(BuiltinMini.Cat).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinMini.Touch)) return this.ptr.as(BuiltinMini.Touch).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinMini.Mkdir)) return this.ptr.as(BuiltinMini.Mkdir).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinMini.Export)) return this.ptr.as(BuiltinMini.Export).onBufferedWriterDone(e);
@@ -8476,6 +8954,10 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             err: ?Syscall.Error = null,
             bytelist: ?*bun.ByteList = null,
             const ParentPtr = BufferedWriterParentPtr;
+
+            pub fn setRemain(this: *BufferedPipeWriter, buf: []const u8) void {
+                this.remain = buf;
+            }
 
             pub fn init(fd: bun.FileDescriptor, remain: []const u8, parent: ParentPtr, bytelist: ?*bun.ByteList) Maybe(BufferedPipeWriter) {
                 var this: @This() = .{
@@ -8596,6 +9078,10 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
             pub const event_loop_kind = EventLoopKind;
             pub usingnamespace JSC.WebCore.NewReadyWatcher(BufferedFdWriter, .writable, onReady);
+
+            pub fn setRemain(this: *BufferedFdWriter, buf: []const u8) void {
+                this.remain = buf;
+            }
 
             pub fn init(fd: bun.FileDescriptor, remain: []const u8, parent: ParentPtr, bytelist: ?*bun.ByteList) Maybe(BufferedFdWriter) {
                 const this: @This() = .{
@@ -8734,6 +9220,124 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             pub fn deinit(this: *BufferedFdWriter) void {
                 this.close();
                 this.parent.onDone(this.err);
+            }
+        };
+
+        const BufferedReaderParentPtr = struct {
+            ptr: Repr,
+            pub const Repr = TaggedPointerUnion(.{
+                BuiltinJs.Cat,
+                BuiltinMini.Cat,
+            });
+            const BuiltinJs = bun.shell.Interpreter.Builtin;
+            const BuiltinMini = bun.shell.InterpreterMini.Builtin;
+            const ParentPtr = @This();
+
+            pub fn init(p: anytype) ParentPtr {
+                return .{
+                    .ptr = Repr.init(p),
+                };
+            }
+
+            pub fn onDeinit(this: ParentPtr, e: ?Syscall.Error) void {
+                if (this.ptr.is(BuiltinJs.Cat)) return this.ptr.as(BuiltinJs.Cat).onBufferedReaderDeinit(e);
+                if (this.ptr.is(BuiltinMini.Cat)) return this.ptr.as(BuiltinMini.Cat).onBufferedReaderDeinit(e);
+                @panic("Invalid ptr tag");
+            }
+
+            pub fn onRead(this: ParentPtr, buf: []const u8, e: ?Syscall.Error) BufferedReadAction {
+                if (this.ptr.is(BuiltinJs.Cat)) return this.ptr.as(BuiltinJs.Cat).onBufferedReaderRead(buf, e);
+                if (this.ptr.is(BuiltinMini.Cat)) return this.ptr.as(BuiltinMini.Cat).onBufferedReaderRead(buf, e);
+                @panic("Invalid ptr tag");
+            }
+        };
+
+        const BufferedFdReader = struct {
+            buf: bun.ByteList = .{},
+            fd: bun.FileDescriptor,
+            err: ?Syscall.Error = null,
+        };
+
+        const BufferedUVReader = struct {
+            buf: bun.ByteList = .{},
+            fd: bun.FileDescriptor,
+            started: bool = false,
+            reading: bool = false,
+            parent: ParentPtr,
+            dealloc_buf: bool = false,
+
+            err: ?Syscall.Error = null,
+            input_buffer: uv.uv_buf_t = std.mem.zeroes(uv.uv_buf_t),
+            read_req: uv.fs_t = std.mem.zeroes(uv.fs_t),
+
+            const ParentPtr = BufferedReaderParentPtr;
+
+            pub fn uvFsCallback(req: *uv.fs_t) callconv(.C) void {
+                const this = bun.cast(*BufferedUVReader, req.data);
+                // defer uv.uv_fs_req_cleanup(&this.write_req);
+                if (req.result.errEnum()) |e| {
+                    log("BufferedUVReader.uv_fs_read fail: {s}", .{@tagName(e)});
+                    this.err = Syscall.Error.fromCode(e, .write);
+                    this.deinit();
+                    return;
+                }
+
+                const read: usize = @intCast(req.result.value);
+                log("BufferedUVReader.uv_fs_read {d}", .{read});
+                if (read == 0) {
+                    this.reading = false;
+                    this.deinit();
+                    return;
+                }
+
+                const slice = this.buf.ptr[0..read];
+                const should_wait = switch (this.parent.onRead(slice, null)) {
+                    .wait => true,
+                    .cont => false,
+                    .done => return this.deinit(),
+                };
+                this.buf.len = 0;
+                this.reading = false;
+                if (!should_wait)
+                    this.readIfPossible();
+            }
+
+            pub fn readIfPossible(this: *BufferedUVReader) void {
+                log("BufferedUVReader(0x{x}) reading={any}", .{ @intFromPtr(this), this.reading });
+                if (this.reading) return;
+
+                this.read_req.data = @ptrCast(this);
+                this.input_buffer = uv.uv_buf_t.init(this.buf.available());
+                const ret = uv.uv_fs_read(uv.Loop.get(), &this.read_req, bun.uvfdcast(this.fd), @ptrCast(&this.input_buffer), 1, -1, uvFsCallback);
+                if (ret.errEnum()) |e| {
+                    this.err = Syscall.Error.fromCode(e, .write);
+                    this.deinit();
+                    return;
+                }
+                this.started = true;
+                this.reading = true;
+            }
+
+            fn close(this: *BufferedUVReader) void {
+                if (this.started) {
+                    uv.uv_fs_req_cleanup(&this.read_req);
+                }
+
+                if (this.dealloc_buf) {
+                    this.buf.deinitWithAllocator(bun.default_allocator);
+                }
+
+                // if (this.fd != bun.invalid_fd) {
+                //     if (bun.FDImpl.decode(this.fd).close()) |e| {
+                //         bun.Output.debugWarn("closing uvfd failed: {anytype}", .{e});
+                //     }
+                // }
+            }
+
+            pub fn deinit(this: *BufferedUVReader) void {
+                log("BufferedUVReader.deinit (0x{x})", .{@intFromPtr(this)});
+                this.close();
+                this.parent.onDeinit(this.err);
             }
         };
     };
@@ -9521,3 +10125,9 @@ pub fn FlagParser(comptime Opts: type) type {
         }
     };
 }
+
+const BufferedReadAction = enum {
+    cont,
+    wait,
+    done,
+};
