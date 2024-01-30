@@ -3405,8 +3405,8 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             log("EXPANDED REDIRECT: {s}\n", .{this.redirection_file.items[0..]});
                             // const perm = 0o666;
                             const perm = 0o664;
-                            const extra: bun.Mode = if (this.node.redirect.append) O.APPEND else O.TRUNC;
-                            const redirfd = switch (ShellSyscall.openat(this.base.shell.cwd_fd, path, O.WRONLY | O.CREAT | extra | O.NONBLOCK, perm)) {
+                            const extra: bun.Mode = if (this.node.redirect.append) std.os.O.APPEND else std.os.O.TRUNC;
+                            const redirfd = switch (ShellSyscall.openat(this.base.shell.cwd_fd, path, std.os.O.WRONLY | std.os.O.CREAT | extra | std.os.O.NONBLOCK, perm)) {
                                 .err => |e| {
                                     const buf = std.fmt.allocPrint(this.spawn_arena.allocator(), "bun: {s}: {s}", .{ e.toSystemError().message, path }) catch bun.outOfMemory();
                                     _ = this.writeFailingError(buf, 1);
@@ -3962,9 +3962,9 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             }
                             const path = cmd.redirection_file.items[0..cmd.redirection_file.items.len -| 1 :0];
                             log("EXPANDED REDIRECT: {s}\n", .{cmd.redirection_file.items[0..]});
-                            // const perm = 0o666;
-                            const perm = 0o664;
-                            const extra: bun.Mode = if (node.redirect.append) O.APPEND else O.TRUNC;
+                            const perm = 0o666;
+                            // const perm = 0o664;
+                            const extra: bun.Mode = if (node.redirect.append) std.os.O.APPEND else std.os.O.TRUNC;
                             // const redirfd = switch (openat(cmd.base.shell.cwd_fd, path, O.WRONLY | O.CREAT | extra | O.NONBLOCK, perm)) {
                             const redirfd = switch (ShellSyscall.openat(cmd.base.shell.cwd_fd, path, std.os.O.WRONLY | std.os.O.CREAT | std.os.O.NONBLOCK | extra, perm)) {
                                 .err => |e| {
@@ -9016,7 +9016,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 log("0x{x} BufferedPipeWriter.writeAllowBlocking({d}, \"{s}[..]\")", .{ @intFromPtr(this), this.remain.len, this.remain[0..@min(16, this.remain.len)] });
                 this.write_req.data = @ptrCast(this);
                 this.input_buffer = uv.uv_buf_t.init(this.remain);
-                const ret = uv.uv_fs_write(uv.Loop.get(), &this.write_req, bun.uvfdcast(this.fd), @ptrCast(&this.input_buffer), 1, 0, uvFsCallback);
+                const ret = uv.uv_fs_write(uv.Loop.get(), &this.write_req, bun.uvfdcast(this.fd), @ptrCast(&this.input_buffer), 1, -1, uvFsCallback);
                 if (ret.errEnum()) |e| {
                     this.err = Syscall.Error.fromCode(e, .write);
                     this.deinit();
@@ -9963,6 +9963,13 @@ const ShellSyscall = struct {
                     .err => |e| return .{ .err = e.withPath(path) },
                 };
             }
+
+            var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+            const p = switch (getPath(dir, path, &buf)) {
+                .result => |p| p,
+                .err => |e| return .{ .err = e },
+            };
+            return bun.sys.open(p, flags, perm);
         }
 
         const fd = switch (Syscall.openat(dir, path, flags, perm)) {

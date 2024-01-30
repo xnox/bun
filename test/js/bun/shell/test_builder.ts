@@ -45,6 +45,7 @@ export class TestBuilder {
     fs.mkdirSync(join(tempdir, path), { recursive: true });
     return this;
   }
+  
 
   file(path: string, contents: string): this {
     const tempdir = this.getTempDir();
@@ -160,40 +161,44 @@ export class TestBuilder {
     // return output;
   }
 
-  // async run(): Promise<undefined> {
-  //   async function doTest(tb: TestBuilder) {
-  //     if (tb.promise.type === "err") {
-  //       const err = tb.promise.val;
-  //       if (tb.expected_error === undefined) throw err;
-  //       if (tb.expected_error === true) return undefined;
-  //       if (tb.expected_error === false) expect(err).toBeUndefined();
-  //       if (typeof tb.expected_error === "string") {
-  //         expect(err.message).toEqual(tb.expected_error);
-  //       }
-  //       return undefined;
-  //     }
+  runAsTest(name: string) {
+      const tb = this
+      test(name, async () => {
+      if (tb.promise.type === "err") {
+        const err = tb.promise.val;
+        if (tb.expected_error === undefined) throw err;
+        if (tb.expected_error === true) return undefined;
+        if (tb.expected_error === false) expect(err).toBeUndefined();
+        if (typeof tb.expected_error === "string") {
+          expect(err.message).toEqual(tb.expected_error);
+        }
+        return undefined;
+      }
+  
+      const output = await tb.promise.val;
+  
+      const { stdout, stderr, exitCode } = output!;
+      const tempdir = tb.tempdir || "NO_TEMP_DIR";
+      if (tb.expected_stdout !== undefined) {
+        if (typeof tb.expected_stdout === "string") {
+          expect(stdout.toString()).toEqual(tb.expected_stdout.replaceAll("$TEMP_DIR", tempdir));
+        } else {
+          tb.expected_stdout(stdout.toString(), tempdir);
+        }
+      }
+      if (tb.expected_stderr !== undefined)
+        expect(stderr.toString()).toEqual(tb.expected_stderr.replaceAll("$TEMP_DIR", tempdir));
+      if (tb.expected_exit_code !== undefined) expect(exitCode).toEqual(tb.expected_exit_code);
+  
+      for (const [filename, expected] of Object.entries(tb.file_equals)) {
+        const actual = await Bun.file(join(tb.tempdir!, filename)).text();
+        expect(actual).toEqual(expected);
+      }
+      }) 
+  
+      // return output;
+  }
 
-  //     const output = await tb.promise.val;
-
-  //     const { stdout, stderr, exitCode } = output!;
-  //     if (tb.expected_stdout !== undefined) expect(stdout.toString()).toEqual(tb.expected_stdout);
-  //     if (tb.expected_stderr !== undefined) expect(stderr.toString()).toEqual(tb.expected_stderr);
-  //     if (tb.expected_exit_code !== undefined) expect(exitCode).toEqual(tb.expected_exit_code);
-
-  //     for (const [filename, expected] of Object.entries(tb.file_equals)) {
-  //       const actual = await Bun.file(filename).text();
-  //       expect(actual).toEqual(expected);
-  //     }
-  //     return output;
-  //   }
-
-  //   if (this._testName !== undefined) {
-  //     test(this._testName, async () => {
-  //       await doTest(this);
-  //     });
-  //   }
-  //   await doTest(this);
-  // }
 }
 function generateRandomString(length: number): string {
   const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
