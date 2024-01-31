@@ -486,6 +486,11 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
         .mini => JSC.AnyTaskWithExtraContext,
     };
 
+    const FIFO = switch (EventLoopKind) {
+        .js => bun.JSC.WebCore.FIFO,
+        .mini => bun.JSC.WebCore.FIFOMini,
+    };
+
     // const Builtin = switch (EventLoopKind) {
     //     .js => NewBuiltin(.js),
     //     .mini => NewBuiltin(.mini),
@@ -4436,7 +4441,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     exec_stdin: struct {
                         stdin_done: bool = false,
                         stdout_done: bool = false,
-                        reader: ?BufferedUVReader = null,
+                        reader: ?BufferedReader = null,
                         writer: ?BufferedWriter = null,
                         errno: ?ExitCode = null,
                     },
@@ -4444,7 +4449,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         args: []const [*:0]const u8,
                         cur_fd: bun.FileDescriptor = bun.invalid_fd,
                         idx: usize = 0,
-                        reader: ?BufferedUVReader = null,
+                        reader: ?BufferedReader = null,
                         writer: ?BufferedWriter = null,
                         read_done: bool = false,
                         errno: ?ExitCode = null,
@@ -4526,15 +4531,15 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             if (this.stdinbuf == null) {
                                 this.stdinbuf = bun.default_allocator.alloc(u8, STREAMED_BLOCK_SIZE) catch bun.outOfMemory();
                             }
-                            exec.reader = BufferedUVReader{
-                                .fd = fd,
-                                .buf = .{
+                            exec.reader = BufferedReader.init(
+                                fd,
+                                .{
                                     .ptr = this.stdinbuf.?.ptr,
                                     .len = 0,
                                     .cap = @intCast(this.stdinbuf.?.len),
                                 },
-                                .parent = BufferedReaderParentPtr.init(this),
-                            };
+                                BufferedReaderParentPtr.init(this),
+                            );
                             exec.reader.?.readIfPossible();
                         },
                         .exec_stdin => {
@@ -4563,15 +4568,15 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                 return;
                             }
 
-                            this.state.exec_stdin.reader = BufferedUVReader{
-                                .fd = this.bltn.stdin.expectFd(),
-                                .buf = .{
+                            this.state.exec_stdin.reader = BufferedReader.init(
+                                this.bltn.stdin.expectFd(),
+                                .{
                                     .ptr = this.stdinbuf.?.ptr,
                                     .len = 0,
                                     .cap = @intCast(this.stdinbuf.?.len),
                                 },
-                                .parent = BufferedReaderParentPtr.init(this),
-                            };
+                                BufferedReaderParentPtr.init(this),
+                            );
                             this.state.exec_stdin.reader.?.readIfPossible();
                         },
                         .waiting_write_err => return,
@@ -9252,10 +9257,130 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             }
         };
 
+        const BufferedReader = if (bun.Environment.isWindows) BufferedUVReader else BufferedFdReader;
+
         const BufferedFdReader = struct {
-            buf: bun.ByteList = .{},
-            fd: bun.FileDescriptor,
+            internal_buffer: bun.ByteList = .{},
+            fifo: FIFO,
             err: ?Syscall.Error = null,
+            parent: BufferedReaderParentPtr,
+            recall_readall: bool = true,
+            dealloc_buf: bool = false,
+            reading: bool = false,
+
+            const ParentPtr = BufferedReaderParentPtr;
+
+            pub fn init(fd: bun.FileDescriptor, buf: bun.ByteList, parent: ParentPtr) BufferedFdReader {
+                var out: BufferedFdReader = .{
+                    .fifo = FIFO{ .fd = fd },
+                    .internal_buffer = buf,
+                    .parent = parent,
+                };
+                out.fifo.buf = out.internal_buffer.available();
+                return out;
+            }
+
+            pub fn readIfPossible(this: *BufferedFdReader) void {
+                this.watch();
+            }
+
+            pub fn onRead(this: *BufferedFdReader, result: JSC.WebCore.StreamResult) void {
+                log("BufferedFdReader ON READ result={s}", .{@tagName(result)});
+                // defer {
+                //     if (this.err != null and @panic("CHECK DONE")) {
+                //         this.deinit();
+                //     } else if (this.recall_readall and this.recall_readall) {
+                //         this.watch();
+                //     }
+                // }
+                switch (result) {
+                    .pending => {
+                        this.watch();
+                        return;
+                    },
+                    .err => |err| {
+                        const e: Syscall.Error = brk: {
+                            if (err == .Error)
+                                break :brk err.Error;
+                            break :brk bun.sys.Error.fromCode(.CANCELED, .read);
+                        };
+                        this.err = e;
+                        // this.fifo.close();
+                        // this.closeFifoSignalCmd();
+                        return;
+                    },
+                    .done => {
+                        this.deinit();
+                        // this.fifo.close();
+                        // this.closeFifoSignalCmd();
+                        return;
+                    },
+                    else => {
+                        const slice = switch (result) {
+                            .into_array => this.fifo.buf[0..result.into_array.len],
+                            else => result.slice(),
+                        };
+                        log("BufferedFdReader onRead: {s}[...]", .{slice[0..@min(slice.len, 16)]});
+                        this.internal_buffer.len += @as(u32, @truncate(slice.len));
+                        if (slice.len > 0)
+                            std.debug.assert(this.internal_buffer.contains(slice));
+
+                        if (slice.len == 0) {
+                            this.reading = false;
+                            this.deinit();
+                            return;
+                        } else {
+                            switch (this.parent.onRead(slice, null)) {
+                                .wait => return,
+                                .done => {
+                                    this.deinit();
+                                    this.reading = false;
+                                },
+                                .cont => {},
+                            }
+                        }
+
+                        this.fifo.buf = this.internal_buffer.available();
+
+                        // this.fifo.buf = this.internal_buffer.ptr[@min(this.internal_buffer.len, this.internal_buffer.cap)..this.internal_buffer.cap];
+
+                        if (result.isDone() or (slice.len == 0 and this.fifo.poll_ref != null and this.fifo.poll_ref.?.isHUP())) {
+                            this.reading = false;
+                            this.deinit();
+                            // this.fifo.close();
+                            // this.closeFifoSignalCmd();
+                        }
+                    },
+                }
+            }
+
+            fn close(this: *BufferedFdReader) void {
+                if (this.dealloc_buf) {
+                    this.internal_buffer.deinitWithAllocator(bun.default_allocator);
+                }
+
+                // this.fifo.fd = bun.invalid_fd;
+                // this.fifo.close();
+                // if (this.fd != bun.invalid_fd) {
+                //     if (bun.FDImpl.decode(this.fd).close()) |e| {
+                //         bun.Output.debugWarn("closing uvfd failed: {anytype}", .{e});
+                //     }
+                // }
+            }
+
+            pub fn watch(this: *BufferedFdReader) void {
+                std.debug.assert(this.fifo.fd != bun.invalid_fd);
+
+                this.fifo.pending.set(@This(), this, onRead);
+                if (!this.fifo.isWatching()) this.fifo.watch(this.fifo.fd);
+                return;
+            }
+
+            pub fn deinit(this: *BufferedFdReader) void {
+                log("BufferedFdReader.deinit (0x{x})", .{@intFromPtr(this)});
+                this.close();
+                this.parent.onDeinit(this.err);
+            }
         };
 
         const BufferedUVReader = struct {
@@ -9271,6 +9396,14 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             read_req: uv.fs_t = std.mem.zeroes(uv.fs_t),
 
             const ParentPtr = BufferedReaderParentPtr;
+
+            pub fn init(fd: bun.FileDescriptor, buf: bun.ByteList, parent: ParentPtr) BufferedUVReader {
+                return .{
+                    .fd = fd,
+                    .buf = buf,
+                    .parent = parent,
+                };
+            }
 
             pub fn uvFsCallback(req: *uv.fs_t) callconv(.C) void {
                 const this = bun.cast(*BufferedUVReader, req.data);
