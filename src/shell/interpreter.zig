@@ -3680,6 +3680,10 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     @setEvalBranchQuota(5000);
                     const tyinfo = @typeInfo(Builtin.Kind);
                     inline for (tyinfo.Enum.fields) |field| {
+                        if (std.mem.eql(u8, field.name, @tagName(Builtin.Kind.cat)) and bun.Environment.isPosix) {
+                            log("Cat builtin disabled on posix for now", .{});
+                            return null;
+                        }
                         if (bun.strings.eqlComptime(str, field.name)) {
                             return comptime std.meta.stringToEnum(Builtin.Kind, field.name).?;
                         }
