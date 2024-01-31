@@ -51,6 +51,8 @@ const Codepoint = CodepointIterator.Cursor.CodePointType;
 // const Codepoint = u32;
 const Cursor = CodepointIterator.Cursor;
 
+const log = bun.Output.scoped(.Glob, false);
+
 const CursorState = struct {
     cursor: CodepointIterator.Cursor = .{},
     /// The index in terms of codepoints
@@ -195,6 +197,7 @@ pub fn GlobWalker_(
             fds_open: if (bun.Environment.allow_assert) usize else u0 = 0,
 
             pub fn init(this: *Iterator) !Maybe(void) {
+                log("Iterator init pattern={s}", .{this.walker.pattern});
                 var path_buf: *[bun.MAX_PATH_BYTES]u8 = &this.walker.pathBuf;
                 const root_path = this.walker.cwd;
                 @memcpy(path_buf[0..root_path.len], root_path[0..root_path.len]);
@@ -329,6 +332,8 @@ pub fn GlobWalker_(
                         },
                     };
                 };
+
+                log("Transition(dirpath={s}, fd={d}, component_idx={d})", .{ dir_path, fd, component_idx });
 
                 this.iter_state.directory.fd = fd;
                 const iterator = DirIterator.iterate(fd.asDir(), .u8);
@@ -640,6 +645,25 @@ pub fn GlobWalker_(
             _ = bun.simdutf.convert.utf8.to.utf32.le(pattern, codepoints);
         }
 
+        pub fn debugPatternComopnents(this: *GlobWalker) void {
+            const pattern = this.pattern;
+            const components = &this.patternComponents;
+            const ptr = @intFromPtr(this);
+            log("GlobWalker(0x{x}) components:", .{ptr});
+            for (components.items) |cmp| {
+                if (cmp.syntax_hint == .None) {
+                    continue;
+                }
+                switch (cmp.syntax_hint) {
+                    .Single => log("  *", .{}),
+                    .Double => log("  **", .{}),
+                    .Dot => log("  .", .{}),
+                    .DotBack => log("  ../", .{}),
+                    .Literal, .WildcardFilepath, .None => log("  hint={s} component_str={s}", .{ @tagName(cmp.syntax_hint), pattern[cmp.start..cmp.len] }),
+                }
+            }
+        }
+
         /// `cwd` should be allocated with the arena
         /// The arena parameter is dereferenced and copied if all allocations go well and nothing goes wrong
         pub fn initWithCwd(
@@ -673,6 +697,10 @@ pub fn GlobWalker_(
             this.follow_symlinks = follow_symlinks;
             this.error_on_broken_symlinks = error_on_broken_symlinks;
             this.only_files = only_files;
+
+            if (bun.Environment.allow_assert) {
+                this.debugPatternComopnents();
+            }
 
             return Maybe(void).success;
         }
@@ -970,6 +998,7 @@ pub fn GlobWalker_(
                 entry_name,
             };
             const name = try this.join(subdir_parts);
+
             // if (comptime sentinel) return name[0 .. name.len - 1 :0];
             return name;
         }
@@ -1662,7 +1691,8 @@ pub fn matchWildcardFilepath(glob: []const u8, path: []const u8) bool {
     const needle = glob[1..];
     const needle_len: u32 = @intCast(needle.len);
     if (path.len < needle_len) return false;
-    return std.mem.eql(u8, needle, path[path.len - needle_len ..]);
+    const haystack = path[path.len - needle_len ..];
+    return std.mem.eql(u8, needle, haystack);
 }
 
 pub fn matchWildcardLiteral(literal: []const u8, path: []const u8) bool {
