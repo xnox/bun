@@ -414,7 +414,7 @@ describe("bunshell", () => {
       expect(stderr.toString()).toEqual(`rm: ${temp_dir}: is a directory\n`);
     });
 
-    test("recursive", async () => {
+    test("force_recursive", async () => {
       const { stdout } = await $`rm -vrf ${temp_dir}`;
       const str = stdout.toString();
       expect(

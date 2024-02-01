@@ -8661,7 +8661,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                         // Need to wait for children to finish
                         if (dir_task.subtask_count.load(.SeqCst) > 1) {
-                            close_fd = false;
+                            close_fd = true;
                             dir_task.need_to_wait.store(true, .SeqCst);
                             return Maybe(void).success;
                         }
@@ -8781,6 +8781,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         };
                         while (true) {
                             if (state.treat_as_dir) {
+                                log("rmdirat({d}, {s})", .{ dirfd, dir_task.path });
                                 switch (ShellSyscall.rmdirat(dirfd, dir_task.path)) {
                                     .result => {
                                         _ = this.verboseDeleted(dir_task, dir_task.path);
