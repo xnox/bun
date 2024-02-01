@@ -1035,11 +1035,7 @@ pub fn GlobWalker_(
         }
 
         inline fn startsWithDot(filepath: []const u8) bool {
-            if (comptime !isWindows) {
-                return filepath[0] == '.';
-            } else {
-                return filepath[1] == '.';
-            }
+            return filepath[0] == '.';
         }
 
         fn hasLeadingDot(filepath: []const u8, comptime allow_non_utf8: bool) bool {
