@@ -8246,7 +8246,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         path: [:0]const u8,
                         is_absolute: bool = false,
                         subtask_count: std.atomic.Value(usize),
-                        need_to_wait: bool = false,
+                        need_to_wait: AtomicVal(bool) = AtomicVal(bool).init(false),
                         kind_hint: EntryKindHint,
                         task: JSC.WorkPoolTask = .{ .callback = runFromThreadPool },
                         deleted_entries: std.ArrayList(u8),
@@ -8301,7 +8301,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                     const cwd_path = switch (Syscall.getFdPath(this.task_manager.cwd, &buf)) {
                                         .result => |p| bun.default_allocator.dupeZ(u8, p) catch bun.outOfMemory(),
                                         .err => |err| {
-                                            print("DirTask({x}) failed: {s}: {s}", .{ @intFromPtr(this), @tagName(err.getErrno()), err.path });
+                                            print("[runFromThreadPoolImpl:getcwd] DirTask({x}) failed: {s}: {s}", .{ @intFromPtr(this), @tagName(err.getErrno()), err.path });
                                             this.task_manager.err_mutex.lock();
                                             defer this.task_manager.err_mutex.unlock();
                                             if (this.task_manager.err == null) {
@@ -8319,7 +8319,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             this.is_absolute = ResolvePath.Platform.auto.isAbsolute(this.path[0..this.path.len]);
                             switch (this.task_manager.removeEntry(this, this.is_absolute)) {
                                 .err => |err| {
-                                    print("DirTask({x}) failed: {s}: {s}", .{ @intFromPtr(this), @tagName(err.getErrno()), err.path });
+                                    print("[runFromThreadPoolImpl] DirTask({x}) failed: {s}: {s}", .{ @intFromPtr(this), @tagName(err.getErrno()), err.path });
                                     this.task_manager.err_mutex.lock();
                                     defer this.task_manager.err_mutex.unlock();
                                     if (this.task_manager.err == null) {
@@ -8334,7 +8334,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         }
 
                         fn handleErr(this: *DirTask, err: Syscall.Error) void {
-                            print("DirTask({x}) failed: {s}: {s}", .{ @intFromPtr(this), @tagName(err.getErrno()), err.path });
+                            print("[handleErr] DirTask({x}) failed: {s}: {s}", .{ @intFromPtr(this), @tagName(err.getErrno()), err.path });
                             this.task_manager.err_mutex.lock();
                             defer this.task_manager.err_mutex.unlock();
                             if (this.task_manager.err == null) {
@@ -8346,8 +8346,9 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         }
 
                         pub fn postRun(this: *DirTask) void {
-                            // All entries including recursive directories were deleted
-                            if (this.need_to_wait) return;
+                            // // This is true if the directory has subdirectories
+                            // // that need to be deleted
+                            if (this.need_to_wait.load(.SeqCst)) return;
 
                             // We have executed all the children of this task
                             if (this.subtask_count.fetchSub(1, .SeqCst) == 1) {
@@ -8359,8 +8360,14 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                 }
 
                                 // If we have a parent and we are the last child, now we can delete the parent
-                                if (this.parent_task != null and this.parent_task.?.subtask_count.fetchSub(1, .SeqCst) == 2) {
-                                    this.parent_task.?.deleteAfterWaitingForChildren();
+                                if (this.parent_task != null) {
+                                    // It's possible that we queued this subdir task and it finished, while the parent
+                                    // was still in the `removeEntryDir` function
+                                    const tasks_left_before_decrement = this.parent_task.?.subtask_count.fetchSub(1, .SeqCst);
+                                    const parent_still_in_remove_entry_dir = !this.parent_task.?.need_to_wait.load(.Monotonic);
+                                    if (!parent_still_in_remove_entry_dir and tasks_left_before_decrement == 2) {
+                                        this.parent_task.?.deleteAfterWaitingForChildren();
+                                    }
                                     return;
                                 }
 
@@ -8372,7 +8379,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         }
 
                         pub fn deleteAfterWaitingForChildren(this: *DirTask) void {
-                            this.need_to_wait = false;
+                            this.need_to_wait.store(false, .SeqCst);
                             var do_post_run = true;
                             defer {
                                 if (do_post_run) this.postRun();
@@ -8383,7 +8390,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                             switch (this.task_manager.removeEntryDirAfterChildren(this)) {
                                 .err => |e| {
-                                    print("DirTask({x}) failed: {s}: {s}", .{ @intFromPtr(this), @tagName(e.getErrno()), e.path });
+                                    print("[deleteAfterWaitingForChildren] DirTask({x}) failed: {s}: {s}", .{ @intFromPtr(this), @tagName(e.getErrno()), e.path });
                                     this.task_manager.err_mutex.lock();
                                     defer this.task_manager.err_mutex.unlock();
                                     if (this.task_manager.err == null) {
@@ -8435,7 +8442,6 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                 .kind_hint = .idk,
                                 .deleted_entries = std.ArrayList(u8).init(bun.default_allocator),
                             },
-                            // .event_loop = JSC.VirtualMachine.get().event_loop,
                             .event_loop = event_loop_ref.get(),
                             .error_signal = error_signal,
                             .root_is_absolute = is_absolute,
@@ -8489,7 +8495,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     }
 
                     pub fn getcwd(this: *ShellRmTask) if (bun.Environment.isWindows) CwdPath else bun.FileDescriptor {
-                        return if (bun.Environment.isWindows) this.cwd_path.? else this.cwd;
+                        return if (bun.Environment.isWindows) this.cwd_path.? else bun.toFD(this.cwd);
                     }
 
                     pub fn verboseDeleted(this: *@This(), dir_task: *DirTask, path: [:0]const u8) Maybe(void) {
@@ -8504,6 +8510,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     }
 
                     pub fn finishConcurrently(this: *ShellRmTask) void {
+                        print("finishConcurrently", .{});
                         if (comptime EventLoopKind == .js) {
                             this.event_loop.enqueueTaskConcurrent(this.concurrent_task.from(this, .manual_deinit));
                         } else {
@@ -8646,7 +8653,8 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                         // Need to wait for children to finish
                         if (dir_task.subtask_count.load(.SeqCst) > 1) {
-                            dir_task.need_to_wait = true;
+                            close_fd = false;
+                            dir_task.need_to_wait.store(true, .SeqCst);
                             return Maybe(void).success;
                         }
 
@@ -8657,6 +8665,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             _ = Syscall.close(fd);
                         }
 
+                        print("[removeEntryDir] remove after children {s}", .{path});
                         switch (ShellSyscall.unlinkatWithFlags(this.getcwd(), path, std.os.AT.REMOVEDIR)) {
                             .result => {
                                 switch (this.verboseDeleted(dir_task, path)) {
