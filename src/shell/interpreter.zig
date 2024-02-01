@@ -5980,7 +5980,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                     switch (errno) {
                         @as(usize, @intFromEnum(bun.C.E.NOTDIR)) => {
-                            const buf = this.bltn.fmtErrorArena(.cd, "not a directory: {s}", .{new_cwd_});
+                            const buf = this.bltn.fmtErrorArena(.cd, "not a directory: {s}\n", .{new_cwd_});
                             if (!this.bltn.stderr.needsIO()) {
                                 switch (this.bltn.writeNoIO(.stderr, buf)) {
                                     .err => |e| return Maybe(void).initErr(e),
@@ -5996,7 +5996,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             return Maybe(void).success;
                         },
                         @as(usize, @intFromEnum(bun.C.E.NOENT)) => {
-                            const buf = this.bltn.fmtErrorArena(.cd, "not a directory: {s}", .{new_cwd_});
+                            const buf = this.bltn.fmtErrorArena(.cd, "not a directory: {s}\n", .{new_cwd_});
                             if (!this.bltn.stderr.needsIO()) {
                                 switch (this.bltn.writeNoIO(.stderr, buf)) {
                                     .err => |e| return Maybe(void).initErr(e),
