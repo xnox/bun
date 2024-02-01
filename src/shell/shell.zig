@@ -39,6 +39,9 @@ pub const STDIN_FD: bun.FileDescriptor = if (bun.Environment.isWindows) bun.FDIm
 pub const STDOUT_FD: bun.FileDescriptor = if (bun.Environment.isWindows) bun.FDImpl.fromUV(1).encode() else bun.STDOUT_FD;
 pub const STDERR_FD: bun.FileDescriptor = if (bun.Environment.isWindows) bun.FDImpl.fromUV(2).encode() else bun.STDERR_FD;
 
+pub const POSIX_DEV_NULL: [:0]const u8 = "/dev/null";
+pub const WINDOWS_DEV_NULL: [:0]const u8 = "NUL";
+
 /// The strings in this type are allocated with event loop ctx allocator
 pub const ShellErr = union(enum) {
     sys: JSC.SystemError,

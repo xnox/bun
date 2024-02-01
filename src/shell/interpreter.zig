@@ -10141,6 +10141,9 @@ inline fn fastMod(val: anytype, comptime rhs: comptime_int) @TypeOf(val) {
 const ShellSyscall = struct {
     fn getPath(dirfd: anytype, to: [:0]const u8, buf: *[bun.MAX_PATH_BYTES]u8) Maybe([:0]const u8) {
         if (bun.Environment.isPosix) @compileError("Don't use this");
+        if (bun.strings.eqlComptime(to[0..to.len], "/dev/null")) {
+            return .{ .result = shell.WINDOWS_DEV_NULL };
+        }
         if (ResolvePath.Platform.posix.isAbsolute(to[0..to.len])) {
             const dirpath = brk: {
                 if (@TypeOf(dirfd) == bun.FileDescriptor) break :brk switch (Syscall.getFdPath(dirfd, buf)) {
