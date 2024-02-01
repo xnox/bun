@@ -7487,7 +7487,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     exec.tasks_done += 1;
                     if (exec.tasks_done >= exec.task_count) {
                         if (exec.err) |err| {
-                            const buf = this.bltn.fmtErrorArena(.ls, "{s}\n", .{err.toSystemError().message.byteSlice()});
+                            const buf = this.bltn.fmtErrorArena(.mv, "{s}\n", .{err.toSystemError().message.byteSlice()});
                             _ = this.writeFailingError(buf, err.errno);
                             return;
                         }
