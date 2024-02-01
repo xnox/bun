@@ -10134,15 +10134,36 @@ inline fn fastMod(val: anytype, comptime rhs: comptime_int) @TypeOf(val) {
     return val & (rhs - 1);
 }
 
-/// Shell modifications for syscalls.
-/// Any function that returns a file descriptor will return a uv file descriptor
+/// Shell modifications for syscalls, mostly to make windows work:
+/// - Any function that returns a file descriptor will return a uv file descriptor
+/// - Sometimes windows doesn't have `*at()` functions like `rmdirat` so we have to join the directory path with the target path
+/// - Converts Posix absolute paths to Windows absolute paths on Windows
 const ShellSyscall = struct {
-    fn getPath(dirfd: bun.FileDescriptor, to: [:0]const u8, buf: *[bun.MAX_PATH_BYTES]u8) Maybe([:0]const u8) {
+    fn getPath(dirfd: anytype, to: [:0]const u8, buf: *[bun.MAX_PATH_BYTES]u8) Maybe([:0]const u8) {
+        if (bun.Environment.isPosix) @compileError("Don't use this");
+        if (ResolvePath.Platform.posix.isAbsolute(to[0..to.len])) {
+            const dirpath = brk: {
+                if (@TypeOf(dirfd) == bun.FileDescriptor) break :brk switch (Syscall.getFdPath(dirfd, buf)) {
+                    .result => |path| path,
+                    .err => |e| return .{ .err = e.withFd(dirfd) },
+                };
+                break :brk dirfd;
+            };
+            const source_root = ResolvePath.windowsFilesystemRoot(dirpath);
+            std.mem.copyForwards(u8, buf[0..source_root.len], source_root);
+            @memcpy(buf[source_root.len..][0 .. to.len - 1], to[1..]);
+            buf[source_root.len + to.len - 1] = 0;
+            return .{ .result = buf[0 .. source_root.len + to.len - 1 :0] };
+        }
         if (ResolvePath.Platform.isAbsolute(.windows, to[0..to.len])) return .{ .result = to };
 
-        const dirpath = switch (Syscall.getFdPath(dirfd, buf)) {
-            .result => |path| path,
-            .err => |e| return .{ .err = e.withFd(dirfd) },
+        const dirpath = brk: {
+            if (@TypeOf(dirfd) == bun.FileDescriptor) break :brk switch (Syscall.getFdPath(dirfd, buf)) {
+                .result => |path| path,
+                .err => |e| return .{ .err = e.withFd(dirfd) },
+            };
+            @memcpy(buf[0..dirfd.len], dirfd[0..dirfd.len]);
+            break :brk buf[0..dirfd.len];
         };
 
         const parts: []const []const u8 = &.{
@@ -10169,6 +10190,17 @@ const ShellSyscall = struct {
     fn openat(dir: bun.FileDescriptor, path: [:0]const u8, flags: bun.Mode, perm: bun.Mode) Maybe(bun.FileDescriptor) {
         if (bun.Environment.isWindows) {
             if (flags & os.O.DIRECTORY != 0) {
+                if (ResolvePath.Platform.posix.isAbsolute(path[0..path.len])) {
+                    var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
+                    const p = switch (getPath(dir, path, &buf)) {
+                        .result => |p| p,
+                        .err => |e| return .{ .err = e },
+                    };
+                    return switch (Syscall.openDirAtWindowsA(dir, p, true, flags & os.O.NOFOLLOW != 0)) {
+                        .result => |fd| .{ .result = bun.toLibUVOwnedFD(fd) },
+                        .err => |e| return .{ .err = e.withPath(path) },
+                    };
+                }
                 return switch (Syscall.openDirAtWindowsA(dir, path, true, flags & os.O.NOFOLLOW != 0)) {
                     .result => |fd| .{ .result = bun.toLibUVOwnedFD(fd) },
                     .err => |e| return .{ .err = e.withPath(path) },
@@ -10210,23 +10242,9 @@ const ShellSyscall = struct {
 
             var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
             const path = brk: {
-                if (ResolvePath.Platform.auto.isAbsolute(to)) break :brk to;
-                switch (@TypeOf(dirfd)) {
-                    bun.FileDescriptor => {
-                        switch (ShellSyscall.getPath(dirfd, to, &buf)) {
-                            .err => |e| return .{ .err = e },
-                            .result => |p| break :brk p,
-                        }
-                    },
-                    [:0]const u8 => {
-                        const parts: []const []const u8 = &.{
-                            dirfd[0..dirfd.len],
-                            to[0..to.len],
-                        };
-                        const path = ResolvePath.joinZBuf(&buf, parts, .auto);
-                        break :brk path;
-                    },
-                    else => @compileError("Bad type: " ++ @typeName(@TypeOf(dirfd))),
+                switch (ShellSyscall.getPath(dirfd, to, &buf)) {
+                    .err => |e| return .{ .err = e },
+                    .result => |p| break :brk p,
                 }
             };
 
@@ -10244,27 +10262,13 @@ const ShellSyscall = struct {
         return Syscall.unlinkatWithFlags(dirfd, to, flags);
     }
 
-    pub fn rmdirat(dirfd: anytype, to: anytype) Maybe(void) {
+    pub fn rmdirat(dirfd: anytype, to: [:0]const u8) Maybe(void) {
         if (bun.Environment.isWindows) {
+            var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
             const path: []const u8 = brk: {
-                if (ResolvePath.Platform.auto.isAbsolute(to)) break :brk to;
-                switch (@TypeOf(dirfd)) {
-                    bun.FileDescriptor => {
-                        var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
-                        const dirpath = switch (Syscall.getFdPath(dirfd, &buf)) {
-                            .result => |path| path,
-                            .err => |e| return .{ .err = e.withFd(dirfd) },
-                        };
-                        const parts: []const []const u8 = &.{ dirpath[0..dirpath.len], to[0..to.len] };
-                        break :brk bun.path.joinZ(parts, .auto);
-                    },
-                    []const u8, [:0]const u8 => {
-                        const parts: []const []const u8 = &.{ dirfd[0..dirfd.len], to[0..to.len] };
-                        break :brk bun.path.joinZ(parts, .auto);
-                    },
-                    else => {
-                        @compileError("Bad type for `dirfd`: " ++ @typeName(dirfd));
-                    },
+                switch (getPath(dirfd, to, &buf)) {
+                    .result => |p| break :brk p,
+                    .err => |e| return .{ .err = e },
                 }
             };
             var wide_buf: [windows.PATH_MAX_WIDE]u16 = undefined;
