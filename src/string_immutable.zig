@@ -1665,6 +1665,15 @@ pub fn addNTPathPrefix(wbuf: []u16, utf16: []const u16) [:0]const u16 {
     return wbuf[0 .. utf16.len + bun.windows.nt_object_prefix.len :0];
 }
 
+pub fn addNTPathPrefixIfNeeded(wbuf: []u16, utf16: []const u16) [:0]const u16 {
+    if (hasPrefixComptimeType(u16, utf16, &bun.windows.nt_object_prefix)) {
+        @memcpy(wbuf[0..utf16.len], utf16);
+        wbuf[utf16.len] = 0;
+        return wbuf[0..utf16.len :0];
+    }
+    return addNTPathPrefix(wbuf, utf16);
+}
+
 // These are the same because they don't have rules like needing a trailing slash
 pub const toNTDir = toNTPath;
 
@@ -5293,6 +5302,7 @@ pub fn convertUTF8toUTF16InBuffer(
     //
     // the reason i didn't implement the fallback is purely because our
     // code in this file is too chaotic. it is left as a TODO
+    if (input.len == 0) return &[_]u16{};
     const result = bun.simdutf.convert.utf8.to.utf16.le(input, buf);
     return buf[0..result];
 }
@@ -5303,6 +5313,7 @@ pub fn convertUTF16toUTF8InBuffer(
 ) ![]const u8 {
     // See above
 
+    if (input.len == 0) return &[_]u8{};
     const result = bun.simdutf.convert.utf16.to.utf8.le(input, buf);
     // switch (result.status) {
     //     .success => return buf[0..result.count],

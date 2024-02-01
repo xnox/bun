@@ -11,7 +11,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile, readFile } from "fs/promises";
 import { bunEnv, runWithErrorPromise, tempDirWithFiles } from "harness";
 import { tmpdir } from "os";
 import { join } from "path";
-import { TestBuilder } from "./util";
+import { TestBuilder, sortedShellOutput } from "./util";
 
 $.env(bunEnv);
 $.cwd(process.cwd());
@@ -25,7 +25,7 @@ beforeAll(async () => {
   await mkdir(temp_dir, { recursive: true });
 
   for (const file of temp_files) {
-    
+
     await writeFile(join(temp_dir, file), "foo");
     // const writer = Bun.file(join(temp_dir, file)).writer();
     // writer.write("foo");
@@ -220,7 +220,7 @@ describe("bunshell", () => {
 
     const sentinel = sentinelByte(buffer);
     const thisFileText = (await readFile(import.meta.path, 'utf8'));
-    const output = new TextDecoder().decode(buffer.slice(0, sentinel)).replaceAll('\r', ''); 
+    const output = new TextDecoder().decode(buffer.slice(0, sentinel)).replaceAll('\r', '');
     expect(output).toEqual(thisFileText);
   });
 
@@ -270,6 +270,16 @@ describe("bunshell", () => {
     const { stdout } = await $`echo $(echo noice)`;
     expect(stdout.toString()).toEqual(`noice\n`);
   });
+
+  describe('glob expansion', () => {
+    // Issue #8403: https://github.com/oven-sh/bun/issues/8403
+    TestBuilder.command`ls *.sdfljsfsdf`.exitCode(1).stderr('bun: no matches found: *.sdfljsfsdf\n').runAsTest('No matches should fail');
+
+    // Should work a different cwd
+    TestBuilder.command`ls *.js`.ensureTempDir().file('foo.js', 'foo').file('bar.js', 'bar').stdout((out) => {
+      expect(sortedShellOutput(out)).toEqual(sortedShellOutput("foo.js\nbar.js\n"))
+    }).runAsTest('ls *.js');
+  })
 
   describe("brace expansion", () => {
     function doTest(pattern: string, expected: string) {

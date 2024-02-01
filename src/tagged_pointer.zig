@@ -66,6 +66,7 @@ pub fn TagTypeEnumWithTypeMap(comptime Types: anytype) struct {
     tag_type: type,
     ty_map: TypeMap(Types),
 } {
+    @setEvalBranchQuota(5000);
     var typeMap: TypeMap(Types) = undefined;
     var enumFields: [Types.len]std.builtin.Type.EnumField = undefined;
     var decls = [_]std.builtin.Type.Declaration{};
