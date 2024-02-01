@@ -3739,9 +3739,11 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 }
 
                 pub fn fromStr(str: []const u8) ?Builtin.Kind {
-                    if (std.mem.eql(u8, str, @tagName(.cat))) {
-                        log("Cat builtin disabled on posix for now", .{});
-                        return null;
+                    if (!bun.Environment.isWindows) {
+                        if (std.mem.eql(u8, str, @tagName(.cat))) {
+                            log("Cat builtin disabled on posix for now", .{});
+                            return null;
+                        }
                     }
                     @setEvalBranchQuota(5000);
                     const tyinfo = @typeInfo(Builtin.Kind);
