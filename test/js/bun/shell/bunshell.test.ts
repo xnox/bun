@@ -16,6 +16,8 @@ import { TestBuilder, sortedShellOutput } from "./util";
 $.env(bunEnv);
 $.cwd(process.cwd());
 
+const DEV_NULL = process.platform === "win32" ? "NUL" : "/dev/null";
+
 const MAX_ENV_SIZE = process.platform === 'win32' ? 32768 : 8192;
 
 let temp_dir: string;
@@ -587,7 +589,7 @@ describe("deno_task", () => {
     //   .run();
 
     // /dev/null
-    TestBuilder.command`BUN_TEST_VAR=1 ${BUN} -e 'console.log(1); console.error(5)' 2> /dev/null`
+    TestBuilder.command`BUN_TEST_VAR=1 ${BUN} -e 'console.log(1); console.error(5)' 2> ${DEV_NULL}`
       .stdout("1\n")
       .runAsTest('dev null');
 
