@@ -14,7 +14,7 @@ import { ShellOutput } from "bun";
 import { TestBuilder, sortedShellOutput } from "../util";
 
 const fileExists = async (...paths: string[]): Promise<boolean> =>
-  $`ls -d ${path.join(...paths)}`.then(o => o.stdout.toString() == `${path.join(...paths)}\n`);
+  $`ls -d ${path.join(...paths)}`.then(o => o.exitCode === 0);
 
 const BUN = process.argv0;
 
