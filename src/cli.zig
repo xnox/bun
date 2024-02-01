@@ -228,7 +228,7 @@ pub const Arguments = struct {
         clap.parseParam("--minify-syntax                  Minify syntax and inline data") catch unreachable,
         clap.parseParam("--minify-whitespace              Minify whitespace") catch unreachable,
         clap.parseParam("--minify-identifiers             Minify identifiers") catch unreachable,
-        clap.parseParam("--dump-environment-variables") catch unreachable,
+        clap.parseParam("--env-prefix                     Prefix for environment variables to embed. Defaults to \"BUN_,VITE_\"") catch unreachable,
     };
     pub const build_params = build_only_params ++ transpiler_params_ ++ base_params_;
 
@@ -721,6 +721,19 @@ pub const Arguments = struct {
                     Output.prettyErrorln("<r><red>error<r>: Invalid sourcemap setting: \"{s}\"", .{setting});
                     Global.crash();
                 }
+            }
+
+            if (args.option("--env-prefix")) |env_prefix_unparsed| {
+                const len = bun.strings.countChar(u8, env_prefix_unparsed, ',');
+                var list = allocator.alloc([]const u8, len + 1);
+                var iter = std.mem.tokenizeScalar(u8, env_prefix_unparsed, ",");
+                var i = 0;
+                while (iter.next()) |token| {
+                    list[i] = std.mem.trim(u8, token, " \n\t");
+                    i += 1;
+                }
+                std.debug.assert(i == len);
+                opts.env_prefix = list;
             }
         }
 
