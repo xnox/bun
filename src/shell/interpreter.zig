@@ -711,7 +711,13 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     }, .auto);
 
                     // remove trailing separator
-                    if (cwd_str.len > 1 and cwd_str[cwd_str.len - 1] == '/') {
+                    if (bun.Environment.isWindows) {
+                        const sep = '\\';
+                        if (cwd_str.len > 1 and cwd_str[cwd_str.len - 1] == sep) {
+                            ResolvePath.join_buf[cwd_str.len - 1] = 0;
+                            break :brk ResolvePath.join_buf[0 .. cwd_str.len - 1 :0];
+                        }
+                    } else if (cwd_str.len > 1 and cwd_str[cwd_str.len - 1] == '/') {
                         ResolvePath.join_buf[cwd_str.len - 1] = 0;
                         break :brk ResolvePath.join_buf[0 .. cwd_str.len - 1 :0];
                     }

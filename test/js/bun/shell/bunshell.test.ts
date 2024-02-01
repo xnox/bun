@@ -616,7 +616,7 @@ describe("deno_task", () => {
       .directory("sub_dir")
       .file("file.txt", "test")
       // $TEMP_DIR gets replaced with the actual temp dir by the test runner
-      .stdout(`$TEMP_DIR\n$TEMP_DIR/sub_dir\n$TEMP_DIR\n`)
+      .stdout(`$TEMP_DIR\n${join("$TEMP_DIR","sub_dir")}\n$TEMP_DIR\n`)
       .run();
   });
 
