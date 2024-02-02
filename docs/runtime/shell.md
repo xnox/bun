@@ -290,22 +290,23 @@ console.log(result); // Blob(13) { size: 13, type: "text/plain" }
 
 For cross-platform compatibility, Bun Shell implements a set of builtin commands, in addition to reading commands from the PATH environment variable.
 
-- `cd`: change the working directory
-- `ls`: list files in a directory
-- `rm`: remove files and directories
-- `echo`: print text
-- `pwd`: print the working directory
+- [`touch`](https://man7.org/linux/man-pages/man1/touch.1p.html): create a file or update its timestamp if it exists
+- [`mkdir`](https://man7.org/linux/man-pages/man1/mkdir.1p.html): create directories
+- [`export`](https://man7.org/linux/man-pages/man1/export.1p.html): set environment variables
+- [`cd`](https://man7.org/linux/man-pages/man1/cd.1p.html): change the working directory
+- [`echo`](https://man7.org/linux/man-pages/man1/echo.1p.html): print text
+- [`pwd`](https://man7.org/linux/man-pages/man1/pwd.1p.html): print the working directory
+- `which`: print the working directory
+- [`rm`](https://man7.org/linux/man-pages/man1/rm.1p.html): remove files and directories
+- [`ls`](https://man7.org/linux/man-pages/man1/ls.1p.html): list files in a directory
 - `bun`: run bun in bun
 
 **Partially** implemented:
-
-- `mv`: move files and directories (missing cross-device support)
+- [`mv`](https://man7.org/linux/man-pages/man1/mv.1p.html): move files and directories (missing cross-device support)
+- [`cat`](https://man7.org/linux/man-pages/man1/cat.1p.html): concatenate files (implemened on Windows, uses system cat on Posix machines)
 
 **Not** implemented yet, but planned:
-
-- `mkdir`: create directories
-- `cp`: copy files and directories
-- `cat`: concatenate files
+- [`cp`](https://man7.org/linux/man-pages/man1/cp.1p.html): copy files and directories
 
 ## Utilities
 
@@ -322,15 +323,26 @@ await $.braces(`echo {1,2,3}`);
 // => ["echo 1", "echo 2", "echo 3"]
 ```
 
-### `$.escape` (unescaped strings)
+### `$.escape` (escape strings)
 
-For security purposes, Bun Shell escapes input by default. If you need to disable that, this function returns a string that is not escaped by Bun Shell:
+Exposes Bun Shell's escaping logic as a function:
 
 ```js
 import { $ } from "bun";
 
-await $`echo ${$.escape("Hello World!")}`;
-// => Hello World!
+console.log($.escape('$(foo) `bar` "baz"'))
+// => \$(foo) \`bar\` \"baz\"
+```
+
+If you do not want your string to be escaped, wrap it in a `{ raw: 'str' }` object:
+
+```js
+import { $ } from "bun";
+
+await $`echo ${{ raw: '$(foo) `bar` "baz"' }}`
+// => bun: command not found: foo
+// => bun: command not found: bara
+// => baz
 ```
 
 ## .bun.sh file loader
