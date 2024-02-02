@@ -1191,14 +1191,10 @@ pub const EventLoop = struct {
         }
 
         if (!loop.isActive()) {
-            if (comptime Environment.isWindows) {
-                bun.todo(@src(), {});
-            } else {
-                if (this.forever_timer == null) {
-                    var t = uws.Timer.create(loop, this);
-                    t.set(this, &noopForeverTimer, 1000 * 60 * 4, 1000 * 60 * 4);
-                    this.forever_timer = t;
-                }
+            if (this.forever_timer == null) {
+                var t = uws.Timer.create(loop, this);
+                t.set(this, &noopForeverTimer, 1000 * 60 * 4, 1000 * 60 * 4);
+                this.forever_timer = t;
             }
         }
 
@@ -1361,13 +1357,6 @@ pub const EventLoop = struct {
             if (comptime Environment.isWindows) {
                 this.uws_loop = bun.uws.Loop.init();
                 this.virtual_machine.event_loop_handle = Async.Loop.get();
-
-                _ = bun.windows.libuv.uv_replace_allocator(
-                    @ptrCast(&bun.Mimalloc.mi_malloc),
-                    @ptrCast(&bun.Mimalloc.mi_realloc),
-                    @ptrCast(&bun.Mimalloc.mi_calloc),
-                    @ptrCast(&bun.Mimalloc.mi_free),
-                );
             } else {
                 this.virtual_machine.event_loop_handle = bun.Async.Loop.get();
             }
