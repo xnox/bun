@@ -146,6 +146,7 @@ pub const WebWorker = struct {
         }
 
         if (this.requested_terminate) {
+            WebWorker__dispatchExit(null, this.cpp_worker, 0);
             this.deinit();
             return;
         }
@@ -389,3 +390,8 @@ pub const WebWorker = struct {
         }
     }
 };
+
+extern "kernel32" fn TerminateThread(
+    hThread: std.os.windows.HANDLE, // [in, out]
+    dwExitCode: std.os.windows.DWORD, // [in]
+) std.os.windows.BOOL;
