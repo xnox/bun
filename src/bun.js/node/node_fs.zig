@@ -242,19 +242,15 @@ pub const Async = struct {
     }
 };
 
-/// The one used by node:fs
-pub const AsyncCpTask = NewAsyncCpTask(.js, false);
-/// The ones used by the shell
-pub const AsyncCpTaskShellJs = NewAsyncCpTask(.js, true);
-pub const AsyncCpTaskShellMini = NewAsyncCpTask(.mini, true);
-
 pub const AsyncCPTaskVtable = struct {
     ctx: *anyopaque,
     /// The supplied paths are borrowed, you have to copy them
     onCopy: *const (fn (*anyopaque, [:0]const u8, [:0]const u8) void) = undefined,
     onFinish: *const (fn (*anyopaque, Maybe(void)) void) = undefined,
+    is_shell: bool = true,
 
-    pub const Dead = AsyncCPTaskVtable{ .ctx = @ptrFromInt(0xDEADBEEF), .onCopy = deadOnCopy, .onFinish = deadOnFinish };
+    pub const Dead = AsyncCPTaskVtable{ .ctx = @ptrFromInt(0xDEADBEEF), .onCopy = deadOnCopy, .onFinish = deadOnFinish, .is_shell = false, };
+
     pub fn deadOnCopy(ctx: *anyopaque, src: [:0]const u8, dest: [:0]const u8) void {
         _ = ctx;
         _ = src;
@@ -308,488 +304,470 @@ pub const AsyncCPTaskVtable = struct {
     }
 };
 
-pub fn NewAsyncCpTask(comptime EventLoopKind: JSC.EventLoopKind, comptime is_shell: bool) type {
-    const GlobalRef = switch (EventLoopKind) {
-        .js => *JSC.JSGlobalObject,
-        .mini => *JSC.MiniEventLoop,
-    };
-    const GlobalHandle = switch (EventLoopKind) {
-        .js => bun.shell.GlobalJS,
-        .mini => bun.shell.GlobalMini,
-    };
-    return struct {
-        args: Arguments.Cp,
-        task: JSC.WorkPoolTask = .{ .callback = &workPoolCallback },
-        result: JSC.Maybe(Return.Cp),
-        ref: bun.Async.KeepAlive = .{},
+pub const AsyncCpTask = struct {
+    args: Arguments.Cp,
+    task: JSC.WorkPoolTask = .{ .callback = &workPoolCallback },
+    result: JSC.Maybe(Return.Cp),
+    ref: bun.Async.KeepAlive = .{},
+    arena: bun.ArenaAllocator,
+    has_result: std.atomic.Value(bool),
+    /// On each creation of a `AsyncCpSingleFileTask`, this is incremented.
+    /// When each task is finished, decrement.
+    /// The maintask thread starts this at 1 and decrements it at the end, to avoid the promise being resolved while new tasks may be added.
+    subtask_count: std.atomic.Value(usize),
+
+    loop: EventLoopHandle,
+    promise: JSC.JSPromise.Strong = .{},
+    tracker: JSC.AsyncTaskTracker,
+    mini_task:  JSC.AnyTaskWithExtraContext = .{},
+
+    vtable: AsyncCPTaskVtable = AsyncCPTaskVtable.Dead,
+
+    const ThisAsyncCpTask = @This();
+
+    pub fn onCopy(this: *ThisAsyncCpTask, src: [:0]const u8, dest: [:0]const u8) void {
+        this.vtable.onCopy(this.vtable.ctx, src, dest);
+    }
+
+    pub fn onFinish(this: *ThisAsyncCpTask, result: Maybe(void)) void {
+        this.vtable.onFinish(this.vtable.ctx, result);
+    }
+
+    pub fn create(
+        globalObject: *JSC.JSGlobalObject,
+        cp_args: Arguments.Cp,
+        vm: *JSC.VirtualMachine,
         arena: bun.ArenaAllocator,
-        has_result: std.atomic.Value(bool),
-        /// On each creation of a `AsyncCpSingleFileTask`, this is incremented.
-        /// When each task is finished, decrement.
-        /// The maintask thread starts this at 1 and decrements it at the end, to avoid the promise being resolved while new tasks may be added.
-        subtask_count: std.atomic.Value(usize),
+    )  JSC.JSValue {
+        const task = createWithVTable(globalObject, cp_args, vm, arena, AsyncCPTaskVtable.Dead);
+        return task.promise.value();
+    }
 
-        globalObject: GlobalRef,
-        promise: if (EventLoopKind == .js and !is_shell) JSC.JSPromise.Strong else u0,
-        tracker: if (EventLoopKind == .js and !is_shell) JSC.AsyncTaskTracker else u0,
-        mini_task: if (EventLoopKind == .mini) JSC.AnyTaskWithExtraContext else u0 = if (EventLoopKind == .mini) .{} else 0,
+    pub fn createWithVTable(
+        globalObject: *JSC.JSGlobalObject,
+        cp_args: Arguments.Cp,
+        vm: *JSC.VirtualMachine,
+        arena: bun.ArenaAllocator,
+        vtable: AsyncCPTaskVtable,
+    )  *ThisAsyncCpTask  {
+        var task = bun.new(
+            ThisAsyncCpTask,
+            ThisAsyncCpTask{
+                .promise = JSC.JSPromise.Strong.init(globalObject),
+                .args = cp_args,
+                .has_result = .{ .raw = false },
+                .result = undefined,
+                .loop = EventLoopHandle.init(globalObject.bunVM()),
+                .tracker = JSC.AsyncTaskTracker.init(vm),
+                .arena = arena,
+                .subtask_count = .{ .raw = 1 },
+                .vtable = vtable,
+            },
+        );
+        task.ref.ref(vm);
+        task.args.src.toThreadSafe();
+        task.args.dest.toThreadSafe();
+        task.tracker.didSchedule(globalObject);
 
-        vtable: AsyncCPTaskVtable = AsyncCPTaskVtable.Dead,
+        JSC.WorkPool.schedule(&task.task);
 
-        const ThisAsyncCpTask = @This();
+        return task;
+    }
 
-        fn getGlobalHandle(ref: GlobalRef) GlobalHandle {
-            return switch (EventLoopKind) {
-                .js => bun.shell.GlobalJS.init(ref),
-                .mini => bun.shell.GlobalMini.init(ref),
-            };
+    pub fn createMini(
+        cp_args: Arguments.Cp,
+        arena: bun.ArenaAllocator,
+        vtable: AsyncCPTaskVtable,
+    ) *ThisAsyncCpTask {
+        var task = bun.new(
+            ThisAsyncCpTask,
+            ThisAsyncCpTask{
+                .args = cp_args,
+                .has_result = .{ .raw = false },
+                .result = undefined,
+                .loop = EventLoopHandle.init(JSC.MiniEventLoop.global),
+                .tracker = JSC.AsyncTaskTracker{ .id = 0 },
+                .arena = arena,
+                .subtask_count = .{ .raw = 1 },
+                .vtable = vtable,
+            },
+        );
+        task.ref.ref(JSC.MiniEventLoop.global);
+        task.args.src.toThreadSafe();
+        task.args.dest.toThreadSafe();
+        // task.tracker.didSchedule(globalObject);
+
+        JSC.WorkPool.schedule(&task.task);
+
+        return task;
+    }
+
+    fn workPoolCallback(task: *JSC.WorkPoolTask) void {
+        const this: *ThisAsyncCpTask = @fieldParentPtr(ThisAsyncCpTask, "task", task);
+
+        var node_fs = NodeFS{};
+        this.cpAsync(&node_fs);
+    }
+
+    /// May be called from any thread (the subtasks)
+    fn finishConcurrently(this: *ThisAsyncCpTask, result: Maybe(Return.Cp)) void {
+        if (this.has_result.cmpxchgStrong(false, true, .Monotonic, .Monotonic)) |_| {
+            return;
         }
 
-        pub fn onCopy(this: *ThisAsyncCpTask, src: [:0]const u8, dest: [:0]const u8) void {
-            this.vtable.onCopy(this.vtable.ctx, src, dest);
+        this.result = result;
+
+        if (this.result == .err) {
+            this.result.err.path = bun.default_allocator.dupe(u8, this.result.err.path) catch "";
         }
 
-        pub fn onFinish(this: *ThisAsyncCpTask, result: Maybe(void)) void {
-            this.vtable.onFinish(this.vtable.ctx, result);
+        switch (this.loop) {
+            .js => {
+                this.loop.js.global.bunVMConcurrently().eventLoop().enqueueTaskConcurrent(JSC.ConcurrentTask.fromCallback(this, runFromJSThread));
+            },
+            .mini => {
+                JSC.MiniEventLoop.global.enqueueTaskConcurrent(this.mini_task.from(this, "runFromJSThreadMini"));
+            },
         }
+    }
 
-        pub fn create(
-            globalObject: *JSC.JSGlobalObject,
-            cp_args: Arguments.Cp,
-            vm: *JSC.VirtualMachine,
-            arena: bun.ArenaAllocator,
-        ) if (is_shell) *ThisAsyncCpTask else JSC.JSValue {
-            return createWithVTable(globalObject, cp_args, vm, arena, AsyncCPTaskVtable.Dead);
-        }
+    pub fn runFromJSThreadMini(this: *ThisAsyncCpTask, _: *void) void {
+        this.runFromJSThread();
+    }
 
-        pub fn createWithVTable(
-            globalObject: *JSC.JSGlobalObject,
-            cp_args: Arguments.Cp,
-            vm: *JSC.VirtualMachine,
-            arena: bun.ArenaAllocator,
-            vtable: AsyncCPTaskVtable,
-        ) if (is_shell) *ThisAsyncCpTask else JSC.JSValue {
-            if (EventLoopKind != .js) @compileLog("Only to be called from JS");
-            var task = bun.new(
-                ThisAsyncCpTask,
-                ThisAsyncCpTask{
-                    .promise = if (!is_shell) JSC.JSPromise.Strong.init(globalObject) else 0,
-                    .args = cp_args,
-                    .has_result = .{ .raw = false },
-                    .result = undefined,
-                    .globalObject = globalObject,
-                    .tracker = if (!is_shell) JSC.AsyncTaskTracker.init(vm) else 0,
-                    .arena = arena,
-                    .subtask_count = .{ .raw = 1 },
-                    .vtable = vtable,
-                },
-            );
-            task.ref.ref(vm);
-            task.args.src.toThreadSafe();
-            task.args.dest.toThreadSafe();
-            if (!is_shell) task.tracker.didSchedule(globalObject);
-
-            JSC.WorkPool.schedule(&task.task);
-
-            if (is_shell) return task;
-            return task.promise.value();
-        }
-
-        pub fn createMini(
-            cp_args: Arguments.Cp,
-            arena: bun.ArenaAllocator,
-            vtable: AsyncCPTaskVtable,
-        ) *ThisAsyncCpTask {
-            if (EventLoopKind == .js) @compileLog("Don't do that");
-            var task = bun.new(
-                ThisAsyncCpTask,
-                ThisAsyncCpTask{
-                    .promise = 0,
-                    .args = cp_args,
-                    .has_result = .{ .raw = false },
-                    .result = undefined,
-                    .globalObject = JSC.MiniEventLoop.global,
-                    .tracker = 0,
-                    .arena = arena,
-                    .subtask_count = .{ .raw = 1 },
-                    .vtable = vtable,
-                },
-            );
-            task.ref.ref(JSC.MiniEventLoop.global);
-            task.args.src.toThreadSafe();
-            task.args.dest.toThreadSafe();
-            // task.tracker.didSchedule(globalObject);
-
-            JSC.WorkPool.schedule(&task.task);
-
-            return task;
-        }
-
-        fn workPoolCallback(task: *JSC.WorkPoolTask) void {
-            const this: *ThisAsyncCpTask = @fieldParentPtr(ThisAsyncCpTask, "task", task);
-
-            var node_fs = NodeFS{};
-            this.cpAsync(&node_fs);
-        }
-
-        /// May be called from any thread (the subtasks)
-        fn finishConcurrently(this: *ThisAsyncCpTask, result: Maybe(Return.Cp)) void {
-            if (this.has_result.cmpxchgStrong(false, true, .Monotonic, .Monotonic)) |_| {
-                return;
-            }
-
-            this.result = result;
-
-            if (this.result == .err) {
-                this.result.err.path = bun.default_allocator.dupe(u8, this.result.err.path) catch "";
-            }
-
-            if (EventLoopKind == .js) {
-                this.globalObject.bunVMConcurrently().eventLoop().enqueueTaskConcurrent(JSC.ConcurrentTask.fromCallback(this, runFromJSThread));
-            } else {
-                this.globalObject.enqueueTaskConcurrent(this.mini_task.from(this, "runFromJSThreadMini"));
-            }
-        }
-
-        pub fn runFromJSThreadMini(this: *ThisAsyncCpTask, _: *void) void {
-            this.runFromJSThread();
-        }
-
-        fn runFromJSThread(this: *ThisAsyncCpTask) void {
-            const globalObject = this.globalObject;
-            if (is_shell) {
-                this.vtable.onFinish(this.vtable.ctx, this.result);
-                this.deinit();
-                return;
-            }
-            var success = @as(JSC.Maybe(Return.Cp).Tag, this.result) == .result;
-            const result = switch (this.result) {
-                .err => |err| err.toJSC(globalObject),
-                .result => |*res| brk: {
-                    const out = globalObject.toJS(res, .temporary);
-                    success = out != .zero;
-
-                    break :brk out;
-                },
-            };
-            var promise_value = this.promise.value();
-            var promise = this.promise.get();
-            promise_value.ensureStillAlive();
-
-            const tracker = this.tracker;
-            tracker.willDispatch(globalObject);
-            defer tracker.didDispatch(globalObject);
-
+    fn runFromJSThread(this: *ThisAsyncCpTask) void {
+        if (this.vtable.is_shell) {
+            this.vtable.onFinish(this.vtable.ctx, this.result);
             this.deinit();
-            switch (success) {
-                false => {
-                    promise.reject(globalObject, result);
-                },
-                true => {
-                    promise.resolve(globalObject, result);
-                },
-            }
+            return;
         }
+        if (this.loop != .js) @panic("AsyncCpTask loop should only be JSC, unless called from Shell");
+        const globalObject = this.loop.js.global;
+        var success = @as(JSC.Maybe(Return.Cp).Tag, this.result) == .result;
+        const result = switch (this.result) {
+            .err => |err| err.toJSC(globalObject),
+            .result => |*res| brk: {
+                const out = globalObject.toJS(res, .temporary);
+                success = out != .zero;
 
-        pub fn deinit(this: *ThisAsyncCpTask) void {
-            if (EventLoopKind == .js) this.ref.unref(this.globalObject.bunVM()) else this.ref.unref(JSC.MiniEventLoop.global);
-            this.args.deinit();
-            if (EventLoopKind == .js and !is_shell) this.promise.strong.deinit();
-            this.arena.deinit();
-            bun.destroy(this);
+                break :brk out;
+            },
+        };
+        var promise_value = this.promise.value();
+        var promise = this.promise.get();
+        promise_value.ensureStillAlive();
+
+        const tracker = this.tracker;
+        tracker.willDispatch(globalObject);
+        defer tracker.didDispatch(globalObject);
+
+        this.deinit();
+        switch (success) {
+            false => {
+                promise.reject(globalObject, result);
+            },
+            true => {
+                promise.resolve(globalObject, result);
+            },
         }
+    }
 
-        pub fn ensureDest(nodefs: *NodeFS, dest: bun.OSPathSliceZ) Maybe(Return.Cp) {
-            return switch (nodefs.mkdirRecursiveOSPath(dest, Arguments.Mkdir.DefaultMode, false)) {
-                .err => |err| Maybe(void){ .err = err },
-                .result => Maybe(Return.Cp).success,
-            };
-        }
+    pub fn deinit(this: *ThisAsyncCpTask) void {
+        if (this.loop == .js) this.ref.unref(this.loop.js.getVmImpl()) else this.ref.unref(JSC.MiniEventLoop.global);
+        this.args.deinit();
+        if (this.loop == .js and !this.vtable.is_shell) this.promise.strong.deinit();
+        this.arena.deinit();
+        bun.destroy(this);
+    }
 
-        /// Directory scanning + clonefile will block this thread, then each individual file copy (what the sync version
-        /// calls "_copySingleFileSync") will be dispatched as a separate task.
-        pub fn cpAsync(this: *ThisAsyncCpTask, nodefs: *NodeFS) void {
-            const args = this.args;
-            var src_buf: bun.OSPathBuffer = undefined;
-            var dest_buf: bun.OSPathBuffer = undefined;
-            const src = args.src.osPath(@ptrCast(&src_buf));
-            const dest = args.dest.osPath(@ptrCast(&dest_buf));
+    pub fn ensureDest(nodefs: *NodeFS, dest: bun.OSPathSliceZ) Maybe(Return.Cp) {
+        return switch (nodefs.mkdirRecursiveOSPath(dest, Arguments.Mkdir.DefaultMode, false)) {
+            .err => |err| Maybe(void){ .err = err },
+            .result => Maybe(Return.Cp).success,
+        };
+    }
 
-            if (Environment.isWindows) {
-                const attributes = windows.GetFileAttributesW(src);
-                if (attributes == windows.INVALID_FILE_ATTRIBUTES) {
-                    this.finishConcurrently(.{ .err = .{
-                        .errno = @intFromEnum(C.SystemErrno.ENOENT),
-                        .syscall = .copyfile,
-                        .path = nodefs.osPathIntoSyncErrorBuf(src),
-                    } });
-                    return;
-                }
-                const file_or_symlink = (attributes & windows.FILE_ATTRIBUTE_DIRECTORY) == 0 or (attributes & windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-                if (file_or_symlink) {
-                    const r = nodefs._copySingleFileSync(
-                        src,
-                        dest,
-                        if (is_shell) @enumFromInt(Constants.Copyfile.force) else @enumFromInt((if (args.flags.errorOnExist or !args.flags.force) Constants.COPYFILE_EXCL else @as(u8, 0))),
-                        attributes,
-                    );
-                    if (r == .err and r.err.errno == @intFromEnum(E.EXIST) and !args.flags.errorOnExist) {
-                        this.finishConcurrently(Maybe(Return.Cp).success);
-                        return;
-                    }
-                    this.onCopy(src, dest);
-                    this.finishConcurrently(r);
-                    return;
-                }
-            } else {
-                const stat_ = switch (Syscall.lstat(src)) {
-                    .result => |result| result,
-                    .err => |err| {
-                        @memcpy(nodefs.sync_error_buf[0..src.len], src);
-                        this.finishConcurrently(.{ .err = err.withPath(nodefs.sync_error_buf[0..src.len]) });
-                        return;
-                    },
-                };
+    /// Directory scanning + clonefile will block this thread, then each individual file copy (what the sync version
+    /// calls "_copySingleFileSync") will be dispatched as a separate task.
+    pub fn cpAsync(this: *ThisAsyncCpTask, nodefs: *NodeFS) void {
+        const args = this.args;
+        var src_buf: bun.OSPathBuffer = undefined;
+        var dest_buf: bun.OSPathBuffer = undefined;
+        const src = args.src.osPath(@ptrCast(&src_buf));
+        const dest = args.dest.osPath(@ptrCast(&dest_buf));
 
-                if (!os.S.ISDIR(stat_.mode)) {
-
-                    // This is the only file, there is no point in dispatching subtasks
-                    const r = nodefs._copySingleFileSync(
-                        src,
-                        dest,
-                        @enumFromInt((if (args.flags.errorOnExist or !args.flags.force) Constants.COPYFILE_EXCL else @as(u8, 0))),
-                        stat_,
-                    );
-                    if (r == .err and r.err.errno == @intFromEnum(E.EXIST) and !args.flags.errorOnExist) {
-                        this.finishConcurrently(Maybe(Return.Cp).success);
-                        return;
-                    }
-                    this.onCopy(src, dest);
-                    this.finishConcurrently(r);
-                    return;
-                }
-            }
-            if (!args.flags.recursive) {
+        if (Environment.isWindows) {
+            const attributes = windows.GetFileAttributesW(src);
+            if (attributes == windows.INVALID_FILE_ATTRIBUTES) {
                 this.finishConcurrently(.{ .err = .{
-                    .errno = @intFromEnum(E.ISDIR),
+                    .errno = @intFromEnum(C.SystemErrno.ENOENT),
                     .syscall = .copyfile,
                     .path = nodefs.osPathIntoSyncErrorBuf(src),
                 } });
                 return;
             }
+            const file_or_symlink = (attributes & windows.FILE_ATTRIBUTE_DIRECTORY) == 0 or (attributes & windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+            if (file_or_symlink) {
+                const r = nodefs._copySingleFileSync(
+                    src,
+                    dest,
+                    if (this.vtable.is_shell) @enumFromInt(Constants.Copyfile.force) else @enumFromInt((if (args.flags.errorOnExist or !args.flags.force) Constants.COPYFILE_EXCL else @as(u8, 0))),
+                    attributes,
+                );
+                if (r == .err and r.err.errno == @intFromEnum(E.EXIST) and !args.flags.errorOnExist) {
+                    this.finishConcurrently(Maybe(Return.Cp).success);
+                    return;
+                }
+                this.onCopy(src, dest);
+                this.finishConcurrently(r);
+                return;
+            }
+        } else {
+            const stat_ = switch (Syscall.lstat(src)) {
+                .result => |result| result,
+                .err => |err| {
+                    @memcpy(nodefs.sync_error_buf[0..src.len], src);
+                    this.finishConcurrently(.{ .err = err.withPath(nodefs.sync_error_buf[0..src.len]) });
+                    return;
+                },
+            };
 
-            const success = this._cpAsyncDirectory(nodefs, args.flags, &src_buf, @intCast(src.len), &dest_buf, @intCast(dest.len));
-            const old_count = this.subtask_count.fetchSub(1, .Monotonic);
-            if (success and old_count == 1) {
-                this.finishConcurrently(Maybe(Return.Cp).success);
+            if (!os.S.ISDIR(stat_.mode)) {
+
+                // This is the only file, there is no point in dispatching subtasks
+                const r = nodefs._copySingleFileSync(
+                    src,
+                    dest,
+                    @enumFromInt((if (args.flags.errorOnExist or !args.flags.force) Constants.COPYFILE_EXCL else @as(u8, 0))),
+                    stat_,
+                );
+                if (r == .err and r.err.errno == @intFromEnum(E.EXIST) and !args.flags.errorOnExist) {
+                    this.onCopy(src, dest);
+                    this.finishConcurrently(Maybe(Return.Cp).success);
+                    return;
+                }
+                this.onCopy(src, dest);
+                this.finishConcurrently(r);
+                return;
+            }
+        }
+        if (!args.flags.recursive) {
+            this.finishConcurrently(.{ .err = .{
+                .errno = @intFromEnum(E.ISDIR),
+                .syscall = .copyfile,
+                .path = nodefs.osPathIntoSyncErrorBuf(src),
+            } });
+            return;
+        }
+
+        const success = this._cpAsyncDirectory(nodefs, args.flags, &src_buf, @intCast(src.len), &dest_buf, @intCast(dest.len));
+        const old_count = this.subtask_count.fetchSub(1, .Monotonic);
+        if (success and old_count == 1) {
+            this.finishConcurrently(Maybe(Return.Cp).success);
+        }
+    }
+
+    // returns boolean `should_continue`
+    fn _cpAsyncDirectory(
+        this: *ThisAsyncCpTask,
+        nodefs: *NodeFS,
+        args: Arguments.Cp.Flags,
+        src_buf: *bun.OSPathBuffer,
+        src_dir_len: PathString.PathInt,
+        dest_buf: *bun.OSPathBuffer,
+        dest_dir_len: PathString.PathInt,
+    ) bool {
+        const src = src_buf[0..src_dir_len :0];
+        const dest = dest_buf[0..dest_dir_len :0];
+
+        if (comptime Environment.isMac) {
+            if (Maybe(Return.Cp).errnoSysP(C.clonefile(src, dest, 0), .clonefile, src)) |err| {
+                switch (err.getErrno()) {
+                    .ACCES,
+                    .NAMETOOLONG,
+                    .ROFS,
+                    .PERM,
+                    .INVAL,
+                    => {
+                        @memcpy(nodefs.sync_error_buf[0..src.len], src);
+                        this.finishConcurrently(.{ .err = err.err.withPath(nodefs.sync_error_buf[0..src.len]) });
+                        return false;
+                    },
+                    // Other errors may be due to clonefile() not being supported
+                    // We'll fall back to other implementations
+                    else => {},
+                }
+            } else {
+                return true;
             }
         }
 
-        // returns boolean `should_continue`
-        fn _cpAsyncDirectory(
-            this: *ThisAsyncCpTask,
-            nodefs: *NodeFS,
-            args: Arguments.Cp.Flags,
-            src_buf: *bun.OSPathBuffer,
-            src_dir_len: PathString.PathInt,
-            dest_buf: *bun.OSPathBuffer,
-            dest_dir_len: PathString.PathInt,
-        ) bool {
-            const src = src_buf[0..src_dir_len :0];
-            const dest = dest_buf[0..dest_dir_len :0];
+        const open_flags = os.O.DIRECTORY | os.O.RDONLY;
+        const fd = switch (Syscall.openatOSPath(bun.invalid_fd, src, open_flags, 0)) {
+            .err => |err| {
+                this.finishConcurrently(.{ .err = err.withPath(nodefs.osPathIntoSyncErrorBuf(src)) });
+                return false;
+            },
+            .result => |fd_| fd_,
+        };
+        defer _ = Syscall.close(fd);
 
-            if (comptime Environment.isMac) {
-                if (Maybe(Return.Cp).errnoSysP(C.clonefile(src, dest, 0), .clonefile, src)) |err| {
-                    switch (err.getErrno()) {
-                        .ACCES,
-                        .NAMETOOLONG,
-                        .ROFS,
-                        .PERM,
-                        .INVAL,
-                        => {
-                            @memcpy(nodefs.sync_error_buf[0..src.len], src);
-                            this.finishConcurrently(.{ .err = err.err.withPath(nodefs.sync_error_buf[0..src.len]) });
-                            return false;
-                        },
-                        // Other errors may be due to clonefile() not being supported
-                        // We'll fall back to other implementations
-                        else => {},
-                    }
-                } else {
-                    return true;
-                }
-            }
+        var buf: bun.OSPathBuffer = undefined;
 
-            const open_flags = os.O.DIRECTORY | os.O.RDONLY;
-            const fd = switch (Syscall.openatOSPath(bun.invalid_fd, src, open_flags, 0)) {
-                .err => |err| {
-
-                    this.finishConcurrently(.{ .err = err.withPath(nodefs.osPathIntoSyncErrorBuf(src)) });
-                    return false;
-                },
-                .result => |fd_| fd_,
-            };
-            defer _ = Syscall.close(fd);
-
-
-            var buf: bun.OSPathBuffer = undefined;
-
-            // const normdest = bun.path.normalizeStringGenericTZ(bun.OSPathChar, dest, &buf, true, std.fs.path.sep, bun.path.isSepAnyT, false, true);
-            const normdest: bun.OSPathSliceZ = if (Environment.isWindows)
-                switch (bun.sys.normalizePathWindows(u16, bun.invalid_fd, dest, &buf)) {
-                    .err => |err| {
-                        this.finishConcurrently(.{ .err = err });
-                        return false;
-                    },
-                    .result => |normdest| normdest,
-                }
-            else
-                dest;
-
-            const mkdir_ = nodefs.mkdirRecursiveOSPath(normdest, Arguments.Mkdir.DefaultMode, false);
-            switch (mkdir_) {
+        // const normdest = bun.path.normalizeStringGenericTZ(bun.OSPathChar, dest, &buf, true, std.fs.path.sep, bun.path.isSepAnyT, false, true);
+        const normdest: bun.OSPathSliceZ = if (Environment.isWindows)
+            switch (bun.sys.normalizePathWindows(u16, bun.invalid_fd, dest, &buf)) {
                 .err => |err| {
                     this.finishConcurrently(.{ .err = err });
                     return false;
                 },
-                .result => {},
+                .result => |normdest| normdest,
             }
+        else
+            dest;
 
-
-            const dir = fd.asDir();
-            var iterator = DirIterator.iterate(dir, if (Environment.isWindows) .u16 else .u8);
-            var entry = iterator.next();
-            while (switch (entry) {
-                .err => |err| {
-                    // @memcpy(nodefs.sync_error_buf[0..src.len], src);
-                    this.finishConcurrently(.{ .err = err.withPath(nodefs.osPathIntoSyncErrorBuf(src)) });
-                    return false;
-                },
-                .result => |ent| ent,
-            }) |current| : (entry = iterator.next()) {
-                switch (current.kind) {
-                    .directory => {
-                        const cname = current.name.slice();
-                        @memcpy(src_buf[src_dir_len + 1 .. src_dir_len + 1 + cname.len], cname);
-                        src_buf[src_dir_len] = std.fs.path.sep;
-                        src_buf[src_dir_len + 1 + cname.len] = 0;
-
-                        @memcpy(dest_buf[dest_dir_len + 1 .. dest_dir_len + 1 + cname.len], cname);
-                        dest_buf[dest_dir_len] = std.fs.path.sep;
-                        dest_buf[dest_dir_len + 1 + cname.len] = 0;
-
-                        const should_continue = this._cpAsyncDirectory(
-                            nodefs,
-                            args,
-                            src_buf,
-                            @truncate(src_dir_len + 1 + cname.len),
-                            dest_buf,
-                            @truncate(dest_dir_len + 1 + cname.len),
-                        );
-                        if (!should_continue) return false;
-                    },
-                    else => {
-                        _ = this.subtask_count.fetchAdd(1, .Monotonic);
-
-                        const cname = current.name.slice();
-
-                        // Allocate a path buffer for the path data
-                        var path_buf = bun.default_allocator.alloc(
-                            bun.OSPathChar,
-                            src_dir_len + 1 + cname.len + 1 + dest_dir_len + 1 + cname.len + 1,
-                        ) catch bun.outOfMemory();
-
-                        @memcpy(path_buf[0..src_dir_len], src_buf[0..src_dir_len]);
-                        path_buf[src_dir_len] = std.fs.path.sep;
-                        @memcpy(path_buf[src_dir_len + 1 .. src_dir_len + 1 + cname.len], cname);
-                        path_buf[src_dir_len + 1 + cname.len] = 0;
-
-                        @memcpy(path_buf[src_dir_len + 1 + cname.len + 1 .. src_dir_len + 1 + cname.len + 1 + dest_dir_len], dest_buf[0..dest_dir_len]);
-                        path_buf[src_dir_len + 1 + cname.len + 1 + dest_dir_len] = std.fs.path.sep;
-                        @memcpy(path_buf[src_dir_len + 1 + cname.len + 1 + dest_dir_len + 1 .. src_dir_len + 1 + cname.len + 1 + dest_dir_len + 1 + cname.len], cname);
-                        path_buf[src_dir_len + 1 + cname.len + 1 + dest_dir_len + 1 + cname.len] = 0;
-
-                        ThisAsyncCpSingleTask.create(
-                            this,
-                            path_buf[0 .. src_dir_len + 1 + cname.len :0],
-                            path_buf[src_dir_len + 1 + cname.len + 1 .. src_dir_len + 1 + cname.len + 1 + dest_dir_len + 1 + cname.len :0],
-                        );
-                    },
-                }
-            }
-
-            return true;
+        const mkdir_ = nodefs.mkdirRecursiveOSPath(normdest, Arguments.Mkdir.DefaultMode, false);
+        switch (mkdir_) {
+            .err => |err| {
+                this.finishConcurrently(.{ .err = err });
+                return false;
+            },
+            .result => {},
         }
 
-        /// This task is used by `AsyncCpTask/fs.promises.cp` to copy a single file.
-        /// When clonefile cannot be used, this task is started once per file.
-        pub const ThisAsyncCpSingleTask = struct {
-            cp_task: *ThisAsyncCpTask,
-            src: bun.OSPathSliceZ,
-            dest: bun.OSPathSliceZ,
-            task: JSC.WorkPoolTask = .{ .callback = &workPoolCallbackSingle },
+        const dir = fd.asDir();
+        var iterator = DirIterator.iterate(dir, if (Environment.isWindows) .u16 else .u8);
+        var entry = iterator.next();
+        while (switch (entry) {
+            .err => |err| {
+                // @memcpy(nodefs.sync_error_buf[0..src.len], src);
+                this.finishConcurrently(.{ .err = err.withPath(nodefs.osPathIntoSyncErrorBuf(src)) });
+                return false;
+            },
+            .result => |ent| ent,
+        }) |current| : (entry = iterator.next()) {
+            switch (current.kind) {
+                .directory => {
+                    const cname = current.name.slice();
+                    @memcpy(src_buf[src_dir_len + 1 .. src_dir_len + 1 + cname.len], cname);
+                    src_buf[src_dir_len] = std.fs.path.sep;
+                    src_buf[src_dir_len + 1 + cname.len] = 0;
 
-            pub fn create(
-                parent: *ThisAsyncCpTask,
-                src: bun.OSPathSliceZ,
-                dest: bun.OSPathSliceZ,
-            ) void {
-                var task = bun.new(ThisAsyncCpSingleTask, .{
-                    .cp_task = parent,
-                    .src = src,
-                    .dest = dest,
-                });
+                    @memcpy(dest_buf[dest_dir_len + 1 .. dest_dir_len + 1 + cname.len], cname);
+                    dest_buf[dest_dir_len] = std.fs.path.sep;
+                    dest_buf[dest_dir_len + 1 + cname.len] = 0;
 
-                JSC.WorkPool.schedule(&task.task);
+                    const should_continue = this._cpAsyncDirectory(
+                        nodefs,
+                        args,
+                        src_buf,
+                        @truncate(src_dir_len + 1 + cname.len),
+                        dest_buf,
+                        @truncate(dest_dir_len + 1 + cname.len),
+                    );
+                    if (!should_continue) return false;
+                },
+                else => {
+                    _ = this.subtask_count.fetchAdd(1, .Monotonic);
+
+                    const cname = current.name.slice();
+
+                    // Allocate a path buffer for the path data
+                    var path_buf = bun.default_allocator.alloc(
+                        bun.OSPathChar,
+                        src_dir_len + 1 + cname.len + 1 + dest_dir_len + 1 + cname.len + 1,
+                    ) catch bun.outOfMemory();
+
+                    @memcpy(path_buf[0..src_dir_len], src_buf[0..src_dir_len]);
+                    path_buf[src_dir_len] = std.fs.path.sep;
+                    @memcpy(path_buf[src_dir_len + 1 .. src_dir_len + 1 + cname.len], cname);
+                    path_buf[src_dir_len + 1 + cname.len] = 0;
+
+                    @memcpy(path_buf[src_dir_len + 1 + cname.len + 1 .. src_dir_len + 1 + cname.len + 1 + dest_dir_len], dest_buf[0..dest_dir_len]);
+                    path_buf[src_dir_len + 1 + cname.len + 1 + dest_dir_len] = std.fs.path.sep;
+                    @memcpy(path_buf[src_dir_len + 1 + cname.len + 1 + dest_dir_len + 1 .. src_dir_len + 1 + cname.len + 1 + dest_dir_len + 1 + cname.len], cname);
+                    path_buf[src_dir_len + 1 + cname.len + 1 + dest_dir_len + 1 + cname.len] = 0;
+
+                    AsyncCpSingleTask.create(
+                        this,
+                        path_buf[0 .. src_dir_len + 1 + cname.len :0],
+                        path_buf[src_dir_len + 1 + cname.len + 1 .. src_dir_len + 1 + cname.len + 1 + dest_dir_len + 1 + cname.len :0],
+                    );
+                },
             }
+        }
 
-            fn workPoolCallbackSingle(task: *JSC.WorkPoolTask) void {
-                var this: *ThisAsyncCpSingleTask = @fieldParentPtr(ThisAsyncCpSingleTask, "task", task);
+        return true;
+    }
+};
 
-                // TODO: error strings on node_fs will die
-                var node_fs = NodeFS{};
+/// This task is used by `AsyncCpTask/fs.promises.cp` to copy a single file.
+/// When clonefile cannot be used, this task is started once per file.
+pub const AsyncCpSingleTask = struct {
+    cp_task: *AsyncCpTask,
+    src: bun.OSPathSliceZ,
+    dest: bun.OSPathSliceZ,
+    task: JSC.WorkPoolTask = .{ .callback = &workPoolCallback },
 
-                const args = this.cp_task.args;
-                const result = node_fs._copySingleFileSync(
-                    this.src,
-                    this.dest,
-                    @enumFromInt((if (args.flags.errorOnExist or !args.flags.force) Constants.COPYFILE_EXCL else @as(u8, 0))),
-                    null,
-                );
+    pub fn create(
+        parent: *AsyncCpTask,
+        src: bun.OSPathSliceZ,
+        dest: bun.OSPathSliceZ,
+    ) void {
+        var task = bun.new(AsyncCpSingleTask, .{
+            .cp_task = parent,
+            .src = src,
+            .dest = dest,
+        });
 
-                brk: {
-                    switch (result) {
-                        .err => |err| {
-                            if (err.errno == @intFromEnum(E.EXIST) and !args.flags.errorOnExist) {
-                                break :brk;
-                            }
-                            this.cp_task.finishConcurrently(result);
-                            this.deinit();
-                            return;
-                        },
-                        .result => {
-                            this.cp_task.onCopy(this.src, this.dest);
-                        },
+        JSC.WorkPool.schedule(&task.task);
+    }
+
+    fn workPoolCallback(task: *JSC.WorkPoolTask) void {
+        var this: *AsyncCpSingleTask = @fieldParentPtr(AsyncCpSingleTask, "task", task);
+
+        // TODO: error strings on node_fs will die
+        var node_fs = NodeFS{};
+
+        const args = this.cp_task.args;
+        const result = node_fs._copySingleFileSync(
+            this.src,
+            this.dest,
+            @enumFromInt((if (args.flags.errorOnExist or !args.flags.force) Constants.COPYFILE_EXCL else @as(u8, 0))),
+            null,
+        );
+
+        brk: {
+            switch (result) {
+                .err => |err| {
+                    if (err.errno == @intFromEnum(E.EXIST) and !args.flags.errorOnExist) {
+                        break :brk;
                     }
-                }
-
-                const old_count = this.cp_task.subtask_count.fetchSub(1, .Monotonic);
-                if (old_count == 1) {
-                    this.cp_task.finishConcurrently(Maybe(Return.Cp).success);
-                }
-
-                this.deinit();
+                    this.cp_task.finishConcurrently(result);
+                    this.deinit();
+                    return;
+                },
+                .result => {
+                    this.cp_task.onCopy(this.src, this.dest);
+                },
             }
+        }
 
-            pub fn deinit(this: *ThisAsyncCpSingleTask) void {
-                // There is only one path buffer for both paths. 2 extra bytes are the nulls at the end of each
-                bun.default_allocator.free(this.src.ptr[0 .. this.src.len + this.dest.len + 2]);
+        const old_count = this.cp_task.subtask_count.fetchSub(1, .Monotonic);
+        if (old_count == 1) {
+            this.cp_task.finishConcurrently(Maybe(Return.Cp).success);
+        }
 
-                bun.destroy(this);
-            }
-        };
-    };
-}
+        this.deinit();
+    }
+
+    pub fn deinit(this: *AsyncCpSingleTask) void {
+        // There is only one path buffer for both paths. 2 extra bytes are the nulls at the end of each
+        bun.default_allocator.free(this.src.ptr[0 .. this.src.len + this.dest.len + 2]);
+
+        bun.destroy(this);
+    }
+};
 
 // pub const AsyncCpTask = struct {
 //     promise: JSC.JSPromise.Strong,
@@ -6961,3 +6939,70 @@ comptime {
     if (!JSC.is_bindgen)
         _ = Bun__mkdirp;
 }
+
+/// DUMMY Temp thing here to remove once we
+pub const EventLoopHandle = union(enum) {
+    js: *JSC.EventLoop,
+    mini: *JSC.MiniEventLoop,
+
+    pub fn init(context: anytype) EventLoopHandle {
+        const Context = @TypeOf(context);
+        return switch (Context) {
+            *JSC.VirtualMachine => .{ .js = context.eventLoop() },
+            *JSC.EventLoop => .{ .js = context },
+            *JSC.MiniEventLoop => .{ .mini = context },
+            *JSC.AnyEventLoop => switch (context.*) {
+                .js => .{ .js = context.js },
+                .mini => .{ .mini = &context.mini },
+            },
+            EventLoopHandle => context,
+            else => @compileError("Invalid context type for EventLoopHandle.init " ++ @typeName(Context)),
+        };
+    }
+
+    pub fn filePolls(this: EventLoopHandle) *bun.Async.FilePoll.Store {
+        return switch (this) {
+            .js => this.js.virtual_machine.rareData().filePolls(this.js.virtual_machine),
+            .mini => this.mini.filePolls(),
+        };
+    }
+
+    pub fn putFilePoll(this: *EventLoopHandle, poll: *Async.FilePoll) void {
+        switch (this.*) {
+            .js => this.js.virtual_machine.rareData().filePolls(this.js.virtual_machine).put(poll, this.js.virtual_machine, poll.flags.contains(.was_ever_registered)),
+            .mini => this.mini.filePolls().put(poll, &this.mini, poll.flags.contains(.was_ever_registered)),
+        }
+    }
+
+    pub fn enqueueTaskConcurrent(this: EventLoopHandle, context: anytype) void {
+        switch (this.*) {
+            .js => {
+                this.js.enqueueTaskConcurrent(
+                    context.toJSTask(),
+                );
+            },
+            .mini => {
+                this.mini.enqueueTaskConcurrent(
+                    context.toMiniTask(),
+                );
+            },
+        }
+    }
+
+    pub fn loop(this: EventLoopHandle) *bun.uws.Loop {
+        return switch (this) {
+            .js => this.js.usocketsLoop(),
+            .mini => this.mini.loop,
+        };
+    }
+
+    pub const platformEventLoop = loop;
+
+    pub fn ref(this: EventLoopHandle) void {
+        this.loop().ref();
+    }
+
+    pub fn unref(this: EventLoopHandle) void {
+        this.loop().unref();
+    }
+};

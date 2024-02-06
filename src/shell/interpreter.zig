@@ -5366,7 +5366,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                         if (comptime EventLoopKind == .js) {
                             const global = this.cp.bltn.parentCmd().base.interpreter.global;
-                            _ = JSC.Node.AsyncCpTaskShellJs.createWithVTable(
+                            _ = JSC.Node.AsyncCpTask.createWithVTable(
                                 global,
                                 args,
                                 global.bunVM(),
@@ -5374,7 +5374,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                 JSC.Node.AsyncCPTaskVtable.from(&this.vtable),
                             );
                         } else {
-                            _ = JSC.Node.AsyncCpTaskShellMini.createMini(
+                            _ = JSC.Node.AsyncCpTask.createMini(
                                 args,
                                 bun.ArenaAllocator.init(bun.default_allocator),
                                 JSC.Node.AsyncCPTaskVtable.from(&this.vtable),
