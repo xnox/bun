@@ -53,6 +53,18 @@ const AtomicVal = std.atomic.Value;
 
 const GlobWalker = @import("../glob.zig").GlobWalker_(null, true);
 
+// invalidState(Cp, this.state);
+fn invalidState(comptime Parent: type, current_state: anytype) noreturn {
+    const tagname = @tagName(current_state);
+    const fields: []const std.builtin.Type.UnionField = std.meta.fields(@TypeOf(current_state));
+    inline for (fields) |field| {
+        if (std.mem.eql(u8, tagname, field.name)) {
+            @panic("Invalid state: " ++ @typeName(Parent) ++ "::" ++ field.name);
+        }
+    }
+    @panic("Invalid state: " ++ @typeName(Parent));
+}
+
 // const Shellfd = if (bun.Environment.isWindows) union(enum) {
 //     fd: bun.FileDescriptor,
 //     pipe:
@@ -3656,6 +3668,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             cwd: bun.FileDescriptor,
 
             impl: union(Kind) {
+                cp: Cp,
                 cat: Cat,
                 touch: Touch,
                 mkdir: Mkdir,
@@ -3672,6 +3685,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             const Result = @import("../result.zig").Result;
 
             pub const Kind = enum {
+                cp,
                 cat,
                 touch,
                 mkdir,
@@ -3690,8 +3704,9 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                 pub fn usageString(this: Kind) []const u8 {
                     return switch (this) {
+                        .cp => "usage: cp [-R [-H | -L | -P]] [-fi | -n] [-aclpsvXx] source_file target_file\n       cp [-R [-H | -L | -P]] [-fi | -n] [-aclpsvXx] source_file ... target_directory\n",
                         .cat => "usage: cat [-belnstuv] [file ...]\n",
-                        .touch => "usage: touch [-A [-][[hh]mm]SS] [-achm] [-r file] [-t [[CC]YY]MMDDhhmm[.SS]]\n       [-d YYYY-MM-DDThh:mm:SS[.frac][tz]] file ...",
+                        .touch => "usage: touch [-A [-][[hh]mm]SS] [-achm] [-r file] [-t [[CC]YY]MMDDhhmm[.SS]]\n       [-d YYYY-MM-DDThh:mm:SS[.frac][tz]] file ...\n",
                         .mkdir => "usage: mkdir [-pv] [-m mode] directory_name ...\n",
                         .@"export" => "",
                         .cd => "",
@@ -3824,6 +3839,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
             pub inline fn callImpl(this: *Builtin, comptime Ret: type, comptime field: []const u8, args_: anytype) Ret {
                 return switch (this.kind) {
+                    .cp => this.callImplWithType(Cp, Ret, "cp", field, args_),
                     .cat => this.callImplWithType(Cat, Ret, "cat", field, args_),
                     .touch => this.callImplWithType(Touch, Ret, "touch", field, args_),
                     .mkdir => this.callImplWithType(Mkdir, Ret, "mkdir", field, args_),
@@ -3910,6 +3926,13 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 };
 
                 switch (kind) {
+                    .cp => {
+                        cmd.exec.bltn.impl = .{
+                            .cp = Cp{
+                                .bltn = &cmd.exec.bltn,
+                            },
+                        };
+                    },
                     .cat => {
                         cmd.exec.bltn.impl = .{
                             .cat = Cat{ .bltn = &cmd.exec.bltn },
@@ -4885,9 +4908,10 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         return Parse.parseFlags(opts, args);
                     }
 
-                    pub fn parseLong(this: *Opts, flag: []const u8) ParseFlagResult {
+                    pub fn parseLong(this: *Opts, flag: []const u8) ?ParseFlagResult {
                         _ = this; // autofix
-                        return .{ .illegal_option = flag };
+                        _ = flag;
+                        return null;
                     }
 
                     fn parseShort(this: *Opts, char: u8, smallflags: []const u8, i: usize) ?ParseFlagResult {
@@ -4916,6 +4940,580 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             },
                             else => {
                                 return .{ .illegal_option = smallflags[1 + i ..] };
+                            },
+                        }
+
+                        return null;
+                    }
+                };
+            };
+
+            pub const Cp = struct {
+                bltn: *Builtin,
+                opts: Opts = .{},
+                state: union(enum) {
+                    idle,
+                    exec: struct {
+                        target_path: [:0]const u8,
+                        paths_to_copy: []const [*:0]const u8,
+                        started: bool = false,
+                        tasks_count: usize = 0,
+                        tasks_done: usize = 0,
+                        output_queue: std.DoublyLinkedList(BlockingOutput) = .{},
+                        started_output_queue: bool = false,
+                        err: ?JSC.SystemError = null,
+                    },
+                    waiting_write_err: BufferedWriter,
+                    done,
+                } = .idle,
+
+                const Target = union(enum) {
+                    file: [:0]const u8,
+                    dir: struct { path: [:0]const u8, fd: ?bun.FileDescriptor = null },
+                };
+
+                const BlockingOutput = struct {
+                    writer: BufferedWriter,
+                    arr: std.ArrayList(u8),
+
+                    pub fn deinit(this: *BlockingOutput) void {
+                        this.arr.deinit();
+                    }
+                };
+
+                pub fn start(this: *Cp) Maybe(void) {
+                    const maybe_filepath_args = switch (this.opts.parse(this.bltn.argsSlice())) {
+                        .ok => |args| args,
+                        .err => |e| {
+                            const buf = switch (e) {
+                                .illegal_option => |opt_str| this.bltn.fmtErrorArena(.cp, "illegal option -- {s}\n", .{opt_str}),
+                                .show_usage => Builtin.Kind.cp.usageString(),
+                                .unsupported => |unsupported| this.bltn.fmtErrorArena(.cp, "unsupported option, please open a GitHub issue -- {s}\n", .{unsupported}),
+                            };
+
+                            _ = this.writeFailingError(buf, 1);
+                            return Maybe(void).success;
+                        },
+                    };
+
+                    if (maybe_filepath_args == null or maybe_filepath_args.?.len <= 1) {
+                        _ = this.writeFailingError(Builtin.Kind.cp.usageString(), 1);
+                        return Maybe(void).success;
+                    }
+
+                    const args = maybe_filepath_args orelse unreachable;
+                    const paths_to_copy = args[0 .. args.len - 1];
+                    const tgt_path = std.mem.span(args[args.len - 1]);
+
+                    this.state = .{ .exec = .{
+                        .target_path = tgt_path,
+                        .paths_to_copy = paths_to_copy,
+                    } };
+
+                    this.next();
+
+                    return Maybe(void).success;
+                }
+
+                pub fn next(this: *Cp) void {
+                    while (this.state != .done) {
+                        switch (this.state) {
+                            .idle => invalidState(Cp, this.state),
+                            .exec => {
+                                var exec = &this.state.exec;
+                                if (exec.started) {
+                                    if (this.state.exec.tasks_done >= this.state.exec.tasks_count and this.state.exec.output_queue.len == 0) {
+                                        const exit_code: ExitCode = if (this.state.exec.err != null) 1 else 0;
+                                        this.state = .done;
+                                        this.bltn.done(exit_code);
+                                        return;
+                                    }
+                                    return;
+                                }
+
+                                exec.started = true;
+                                exec.tasks_count = exec.paths_to_copy.len;
+
+                                const cwd_path = this.bltn.parentCmd().base.shell.cwdZ();
+                                for (exec.paths_to_copy) |path_raw| {
+                                    const path = std.mem.span(path_raw);
+                                    const cp_task = bun.new(ShellCpTask, ShellCpTask{
+                                        .cp = this,
+                                        .opts = this.opts,
+                                        .src = path,
+                                        .tgt = exec.target_path,
+                                        .cwd_path = cwd_path,
+                                        .vtable = .{},
+                                    });
+                                    cp_task.run();
+                                }
+                                return;
+                            },
+                            .waiting_write_err => return,
+                            .done => unreachable,
+                        }
+                    }
+
+                    this.bltn.done(0);
+                }
+
+                pub fn deinit(this: *Cp) void {
+                    _ = this;
+                }
+
+                pub fn onBufferedWriterDone(this: *Cp, e: ?Syscall.Error) void {
+                    _ = e; // autofix
+
+                    if (this.state == .waiting_write_err) {
+                        // if (e) |err| return this.bltn.done(1);
+                        return this.bltn.done(1);
+                    }
+
+                    var queue = &this.state.exec.output_queue;
+                    var first = queue.popFirst().?;
+                    defer {
+                        first.data.deinit();
+                        bun.default_allocator.destroy(first);
+                    }
+                    if (first.next) |next_writer| {
+                        next_writer.data.writer.writeIfPossible(false);
+                        return;
+                    }
+
+                    this.next();
+                }
+
+                pub fn writeFailingError(this: *Cp, buf: []const u8, exit_code: ExitCode) Maybe(void) {
+                    if (this.bltn.stderr.needsIO()) {
+                        const fd = this.bltn.stderr.expectFd();
+                        const bw = switch (BufferedWriter.init(fd, buf, BufferedWriter.ParentPtr.init(this), this.bltn.stdBufferedBytelist(.stderr))) {
+                            .result => |bw| bw,
+                            .err => |e| return .{ .err = e.withFd(fd) },
+                        };
+                        this.state = .{ .waiting_write_err = bw };
+                        this.state.waiting_write_err.writeIfPossible(false);
+                        return Maybe(void).success;
+                    }
+
+                    if (this.bltn.writeNoIO(.stderr, buf).asErr()) |e| {
+                        return .{ .err = e };
+                    }
+
+                    this.bltn.done(exit_code);
+                    return Maybe(void).success;
+                }
+
+                pub fn queueBlockingOutput(this: *Cp, bo: BlockingOutput) void {
+                    _ = this.queueBlockingOutputImpl(bo, true);
+                }
+
+                pub fn queueBlockingOutputImpl(this: *Cp, bo: BlockingOutput, do_run: bool) CoroutineResult {
+                    const node = bun.default_allocator.create(std.DoublyLinkedList(BlockingOutput).Node) catch bun.outOfMemory();
+                    node.* = .{
+                        .data = bo,
+                    };
+                    this.state.exec.output_queue.append(node);
+
+                    // Start it
+                    if (this.state.exec.output_queue.len == 1 and do_run) {
+                        // if (do_run and !this.state.exec.started_output_queue) {
+                        this.state.exec.started_output_queue = true;
+                        this.state.exec.output_queue.first.?.data.writer.writeIfPossible(false);
+                        return .yield;
+                    }
+                    return .cont;
+                }
+
+                fn scheduleBlockingOutput(this: *Cp) CoroutineResult {
+                    if (this.state.exec.output_queue.len > 0) {
+                        this.state.exec.output_queue.first.?.data.writer.writeIfPossible(false);
+                        return .yield;
+                    }
+                    return .cont;
+                }
+
+                pub fn onAsyncTaskDone(this: *Cp, task: *ShellCpTask) void {
+                    this.state.exec.tasks_done += 1;
+                    const output = task.takeOutput();
+                    const err = task.err;
+                    var queued: bool = false;
+
+                    // Check for error, print it, but still want to print task output
+                    if (err) |e| {
+                        const error_string = this.bltn.taskErrorToString(.cp, e);
+                        this.state.exec.err = e;
+
+                        if (this.bltn.stderr.needsIO()) {
+                            queued = true;
+                            const blocking_output: BlockingOutput = .{
+                                .writer = switch (BufferedWriter.init(
+                                    this.bltn.stderr.expectFd(),
+                                    error_string,
+                                    BufferedWriter.ParentPtr.init(this),
+                                    this.bltn.stdBufferedBytelist(.stderr),
+                                )) {
+                                    .result => |bw| bw,
+                                    .err => |errrr| {
+                                        global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(errrr));
+                                        return;
+                                    },
+                                },
+                                .arr = std.ArrayList(u8).init(bun.default_allocator),
+                            };
+                            _ = this.queueBlockingOutputImpl(blocking_output, false);
+                            // if (!need_to_write_to_stdout_with_io) return; // yield execution
+                        } else {
+                            if (this.bltn.writeNoIO(.stderr, error_string).asErr()) |theerr| {
+                                global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(theerr));
+                            }
+                        }
+                    }
+
+                    if (this.bltn.stdout.needsIO()) {
+                        queued = true;
+                        const blocking_output: BlockingOutput = .{
+                            .writer = switch (BufferedWriter.init(
+                                this.bltn.stdout.expectFd(),
+                                output.items[0..],
+                                BufferedWriter.ParentPtr.init(this),
+                                this.bltn.stdBufferedBytelist(.stdout),
+                            )) {
+                                .result => |bw| bw,
+                                .err => |theerr| {
+                                    global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(theerr));
+                                    return;
+                                },
+                            },
+                            .arr = output,
+                        };
+                        _ = this.queueBlockingOutputImpl(blocking_output, false);
+                        // if (this.state == .done) return;
+                        // return this.next();
+                    }
+
+                    if (queued) {
+                        if (this.scheduleBlockingOutput() == .yield) return;
+                        if (this.state == .done) return;
+                        return this.next();
+                    }
+
+                    defer output.deinit();
+
+                    if (this.bltn.writeNoIO(.stdout, output.items[0..]).asErr()) |e| {
+                        global_handle.get().actuallyThrow(bun.shell.ShellErr.newSys(e));
+                        return;
+                    }
+
+                    return this.next();
+                }
+
+                const ShellCpTask = struct {
+                    cp: *Cp,
+
+                    opts: Opts,
+                    src: [:0]const u8,
+                    tgt: [:0]const u8,
+                    cwd_path: [:0]const u8,
+                    verbose_output: ArrayList(u8) = ArrayList(u8).init(bun.default_allocator),
+                    vtable: NodeCpVtable,
+                    err: ?JSC.SystemError = null,
+
+                    const print = bun.Output.scoped(.ShellCpTask, false);
+
+                    fn deinit(this: *ShellCpTask) void {
+                        this.verbose_output.deinit();
+                    }
+
+                    fn onFinish(this: *ShellCpTask) void  {
+                        this.cp.onAsyncTaskDone(this);
+                        this.deinit();
+                    }
+
+                    fn takeOutput(this: *ShellCpTask) ArrayList(u8) {
+                        const out = this.verbose_output;
+                        this.verbose_output = ArrayList(u8).init(bun.default_allocator);
+                        return out;
+                    }
+
+                    pub fn ensureDest(nodefs: *JSC.Node.NodeFS, dest: bun.OSPathSliceZ) Maybe(void) {
+                        return switch (nodefs.mkdirRecursiveOSPath(dest, JSC.Node.Arguments.Mkdir.DefaultMode, false)) {
+                            .err => |err| Maybe(void){ .err = err },
+                            .result => Maybe(void).success,
+                        };
+                    }
+
+                    pub fn hasTrailingSep(path: [:0]const u8) bool {
+                        if (path.len == 0) return false;
+                        return ResolvePath.Platform.auto.isSeparator(path[path.len - 1]);
+                    }
+
+                    const Kind = enum {
+                        file,
+                        dir,
+                    };
+
+                    pub fn isDir(this: *ShellCpTask, path: [:0]const u8) Maybe(bool) {
+                        _ = this;
+                        if (bun.Environment.isWindows) {
+                            const attributes = windows.GetFileAttributesW(path);
+                            if (attributes == windows.INVALID_FILE_ATTRIBUTES) {
+                                const err: Syscall.Error = .{
+                                    .errno = @intFromEnum(bun.C.SystemErrno.ENOENT),
+                                    .syscall = .copyfile,
+                                    .path = path,
+                                };
+                                return .{ .err = err };
+                            }
+                            return attributes & windows.FILE_ATTRIBUTE_DIRECTORY != 0;
+                        }
+                        const stat = switch (Syscall.lstat(path)) {
+                            .result => |x| x,
+                            .err => |e| {
+                                return .{ .err = e };
+                            },
+                        };
+                        return .{ .result = os.S.ISDIR(stat.mode) };
+                    }
+
+                    fn run(this: *ShellCpTask) void {
+                        var buf2: [bun.MAX_PATH_BYTES]u8 = undefined;
+                        var buf3: [bun.MAX_PATH_BYTES]u8 = undefined;
+                        // We have to give an absolute path to our cp
+                        // implementation for it to work with cwd
+                        const src: [:0]const u8 = brk: {
+                            if (ResolvePath.Platform.auto.isAbsolute(this.src)) break :brk this.src;
+                            const parts: []const []const u8 = &.{
+                                this.cwd_path[0..],
+                                this.src[0..],
+                            };
+                            break :brk ResolvePath.joinZ(parts, .auto);
+                        };
+                        var tgt: [:0]const u8 = brk: {
+                            if (ResolvePath.Platform.auto.isAbsolute(this.tgt)) break :brk this.tgt;
+                            const parts: []const []const u8 = &.{
+                                this.cwd_path[0..],
+                                this.tgt[0..],
+                            };
+                            break :brk ResolvePath.joinZBuf(buf2[0..bun.MAX_PATH_BYTES], parts, .auto);
+                        };
+
+
+                        // Cases:
+                        // SRC       DEST
+                        // ----------------
+                        // file   -> file
+                        // file   -> folder
+                        // folder -> folder
+                        // ----------------
+                        // We need to check dest to see what it is
+                        // If it doesn't exist we need to create it
+                        const src_is_dir = switch (this.isDir(src)) {
+                            .result => |x| x,
+                            .err => |e| {
+                                this.err = e.toSystemError();
+                                return this.onFinish();
+                            },
+                        };
+
+                        const tgt_is_dir = switch (this.isDir(tgt)) {
+                            .result => |x| x,
+                            .err => |e| brk: {
+                                if (e.getErrno() == bun.C.E.NOENT) {
+                                    // If it has a trailing directory separator, its a directory
+                                    // Otherwise its a directory if src is a directory
+                                    const is_dir = hasTrailingSep(tgt) or src_is_dir;
+                                    if (is_dir) {
+                                        var nodefs = JSC.Node.NodeFS{};
+                                        const tgt_pathlike = JSC.Node.PathLike{ .string = bun.PathString.init(tgt)};
+                                        var dest_buf: bun.OSPathBuffer = undefined;
+                                        const dest = tgt_pathlike.osPath(@ptrCast(&dest_buf));
+                                        if (ensureDest(&nodefs, dest).asErr()) |err|  {
+                                            this.err = err.toSystemError();
+                                            return this.onFinish();
+                                        }
+                                    }
+                                    break :brk is_dir;
+                                }
+                                this.err = e.toSystemError();
+                                return this.onFinish();
+                            },
+                        };
+
+                        if (!tgt_is_dir and src_is_dir) {
+                            this.err = Syscall.Error.fromCode(bun.C.E.ISDIR, .TODO).withPath(src).toSystemError();
+                            return this.onFinish();
+                        }
+
+                        if (tgt_is_dir) {
+                            const basename = ResolvePath.basename(src[0..src.len]);
+                            const parts: []const []const u8 = &.{
+                                tgt[0..tgt.len],
+                                basename,
+                            };
+                            tgt = ResolvePath.joinZBuf(buf3[0..bun.MAX_PATH_BYTES], parts, .auto);
+                        }
+
+                        const args = JSC.Node.Arguments.Cp{
+                            .src = JSC.Node.PathLike{ .string = bun.PathString.init(src) },
+                            .dest = JSC.Node.PathLike{ .string = bun.PathString.init(tgt) },
+                            .flags = .{
+                                .mode = @enumFromInt(0),
+                                .recursive = this.opts.recursive,
+                                .force = false,
+                                .errorOnExist = false,
+                            },
+                        };
+
+                        if (comptime EventLoopKind == .js) {
+                            const global = this.cp.bltn.parentCmd().base.interpreter.global;
+                            _ = JSC.Node.AsyncCpTaskShellJs.createWithVTable(
+                                global,
+                                args,
+                                global.bunVM(),
+                                bun.ArenaAllocator.init(bun.default_allocator),
+                                JSC.Node.AsyncCPTaskVtable.from(&this.vtable),
+                            );
+                        } else {
+                            _ = JSC.Node.AsyncCpTaskShellMini.createMini(
+                                args,
+                                bun.ArenaAllocator.init(bun.default_allocator),
+                                JSC.Node.AsyncCPTaskVtable.from(&this.vtable),
+                            );
+                        }
+                    }
+
+                    const NodeCpVtable = struct {
+                        inline fn shellTask(this: *NodeCpVtable) *ShellCpTask {
+                            return @fieldParentPtr(ShellCpTask, "vtable", this);
+                        }
+
+                        pub fn onCopy(this: *NodeCpVtable, src: [:0]const u8, dest: [:0]const u8) void {
+                            var writer = this.shellTask().verbose_output.writer();
+                            writer.print("{s} -> {s}\n", .{ src, dest }) catch bun.outOfMemory();
+                        }
+
+                        pub fn onFinish(this: *NodeCpVtable, result: Maybe(void)) void {
+                            if (result.asErr()) |e| {
+                                this.shellTask().err = e.toSystemError();
+                            }
+                            this.shellTask().onFinish();
+                        }
+                    };
+                };
+
+                const Opts = struct {
+                    /// -f
+                    ///
+                    /// If the destination file cannot be opened, remove it and create a
+                    /// new file, without prompting for confirmation regardless of its
+                    /// permissions.  (The -f option overrides any previous -n option.) The
+                    /// target file is not unlinked before the copy.  Thus, any existing access
+                    /// rights will be retained.
+                    remove_and_create_new_file_if_not_found: bool = false,
+
+                    /// -H
+                    ///
+                    /// Take actions based on the type and contents of the file
+                    /// referenced by any symbolic link specified as a
+                    /// source_file operand.
+                    dereference_command_line_symlinks: bool = false,
+
+                    /// -i
+                    ///
+                    /// Write a prompt to standard error before copying to any
+                    /// existing non-directory destination file. If the
+                    /// response from the standard input is affirmative, the
+                    /// copy shall be attempted; otherwise, it shall not.
+                    interactive: bool = false,
+
+                    /// -L
+                    ///
+                    /// Take actions based on the type and contents of the file
+                    /// referenced by any symbolic link specified as a
+                    /// source_file operand or any symbolic links encountered
+                    /// during traversal of a file hierarchy.
+                    dereference_all_symlinks: bool = false,
+
+                    /// -P
+                    ///
+                    /// Take actions on any symbolic link specified as a
+                    /// source_file operand or any symbolic link encountered
+                    /// during traversal of a file hierarchy.
+                    preserve_symlinks: bool = false,
+
+                    /// -p
+                    ///
+                    /// Duplicate the following characteristics of each source
+                    /// file in the corresponding destination file:
+                    /// 1. The time of last data modification and time of last
+                    ///    access.
+                    /// 2. The user ID and group ID.
+                    /// 3. The file permission bits and the S_ISUID and
+                    ///    S_ISGID bits.
+                    preserve_file_attributes: bool = false,
+
+                    /// -R
+                    ///
+                    /// Copy file hierarchies.
+                    recursive: bool = false,
+
+                    /// -v
+                    ///
+                    /// Cause cp to be verbose, showing files as they are copied.
+                    verbose: bool = false,
+
+                    /// -n
+                    ///
+                    /// Do not overwrite an existing file.  (The -n option overrides any previous -f or -i options.)
+                    overwrite_existing_file: bool = true,
+
+                    const Parse = FlagParser(*@This());
+
+                    pub fn parse(opts: *Opts, args: []const [*:0]const u8) Result(?[]const [*:0]const u8, ParseError) {
+                        return Parse.parseFlags(opts, args);
+                    }
+
+                    pub fn parseLong(this: *Opts, flag: []const u8) ?ParseFlagResult {
+                        _ = this;
+                        _ = flag;
+                        return null;
+                    }
+
+                    fn parseShort(this: *Opts, char: u8, smallflags: []const u8, i: usize) ?ParseFlagResult {
+                        switch (char) {
+                            'f' => {
+                                return .{.unsupported = unsupportedFlag("-f")};
+                            },
+                            'H' => {
+                                return .{ .unsupported = unsupportedFlag("-H") };
+                            },
+                            'i' => {
+                                return .{ .unsupported = unsupportedFlag("-i") };
+                            },
+                            'L' => {
+                                return .{ .unsupported = unsupportedFlag("-L") };
+                            },
+                            'P' => {
+                                return .{ .unsupported = unsupportedFlag("-P") };
+                            },
+                            'p' => {
+                                return .{ .unsupported = unsupportedFlag("-P") };
+                            },
+                            'R' => {
+                                this.recursive = true;
+                                return .continue_parsing;
+                            },
+                            'v' => {
+                                this.verbose = true;
+                                return .continue_parsing;
+                            },
+                            'n' => {
+                                this.overwrite_existing_file = true;
+                                this.remove_and_create_new_file_if_not_found = false;
+                                return .continue_parsing;
+                            },
+                            else => {
+                                return .{ .illegal_option = smallflags[i ..] };
                             },
                         }
 
@@ -5072,7 +5670,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
                     // Check for error, print it, but still want to print task output
                     if (err) |e| {
-                        const error_string = this.bltn.taskErrorToString(.mkdir, e);
+                        const error_string = this.bltn.taskErrorToString(.touch, e);
                         this.state.exec.err = e;
 
                         if (this.bltn.stderr.needsIO()) {
@@ -5274,7 +5872,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         return Parse.parseFlags(opts, args);
                     }
 
-                    pub fn parseLong(this: *Opts, flag: []const u8) ParseFlagResult {
+                    pub fn parseLong(this: *Opts, flag: []const u8) ?ParseFlagResult {
                         _ = this;
                         if (bun.strings.eqlComptime(flag, "--no-create")) {
                             return .{
@@ -5300,7 +5898,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             };
                         }
 
-                        return .{ .illegal_option = flag };
+                        return null;
                     }
 
                     fn parseShort(this: *Opts, char: u8, smallflags: []const u8, i: usize) ?ParseFlagResult {
@@ -5728,7 +6326,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         return Parse.parseFlags(opts, args);
                     }
 
-                    pub fn parseLong(this: *Opts, flag: []const u8) ParseFlagResult {
+                    pub fn parseLong(this: *Opts, flag: []const u8) ?ParseFlagResult {
                         if (bun.strings.eqlComptime(flag, "--mode")) {
                             return .{ .unsupported = "--mode" };
                         } else if (bun.strings.eqlComptime(flag, "--parents")) {
@@ -5739,7 +6337,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             return .continue_parsing;
                         }
 
-                        return .{ .illegal_option = flag };
+                        return null;
                     }
 
                     fn parseShort(this: *Opts, char: u8, smallflags: []const u8, i: usize) ?ParseFlagResult {
@@ -8912,6 +9510,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
 
         pub const BufferedWriterParentPtr = struct {
             const Types = .{
+                BuiltinJs.Cp,
                 BuiltinJs.Cat,
                 BuiltinJs.Touch,
                 BuiltinJs.Mkdir,
@@ -8923,6 +9522,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 BuiltinJs.Pwd,
                 BuiltinJs.Mv,
                 BuiltinJs.Ls,
+                BuiltinMini.Cp,
                 BuiltinMini.Cat,
                 BuiltinMini.Touch,
                 BuiltinMini.Mkdir,
@@ -8963,6 +9563,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
             }
 
             pub fn onDone(this: ParentPtr, e: ?Syscall.Error) void {
+                if (this.ptr.is(BuiltinJs.Cp)) return this.ptr.as(BuiltinJs.Cp).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Cat)) return this.ptr.as(BuiltinJs.Cat).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Touch)) return this.ptr.as(BuiltinJs.Touch).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Mkdir)) return this.ptr.as(BuiltinJs.Mkdir).onBufferedWriterDone(e);
@@ -8974,6 +9575,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                 if (this.ptr.is(BuiltinJs.Pwd)) return this.ptr.as(BuiltinJs.Pwd).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Mv)) return this.ptr.as(BuiltinJs.Mv).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinJs.Ls)) return this.ptr.as(BuiltinJs.Ls).onBufferedWriterDone(e);
+                if (this.ptr.is(BuiltinMini.Cp)) return this.ptr.as(BuiltinMini.Cp).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinMini.Cat)) return this.ptr.as(BuiltinMini.Cat).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinMini.Touch)) return this.ptr.as(BuiltinMini.Touch).onBufferedWriterDone(e);
                 if (this.ptr.is(BuiltinMini.Mkdir)) return this.ptr.as(BuiltinMini.Mkdir).onBufferedWriterDone(e);
@@ -10306,7 +10908,7 @@ pub fn FlagParser(comptime Opts: type) type {
             if (flag.len == 1) return .{ .illegal_option = "-" };
 
             if (flag.len > 2 and flag[1] == '-') {
-                return opts.parseLong(flag);
+                if (opts.parseLong(flag)) |result| return result;
             }
 
             const small_flags = flag[1..];
