@@ -672,27 +672,27 @@ describe("lex shell", () => {
       await TestBuilder.command`echo hi &`.error("Unexpected EOF").run();
     });
 
-    test("Unclosed subshell", async () => {
-      await TestBuilder.command`echo hi && $(echo uh oh`.error("Unclosed command substitution").run();
-      await TestBuilder.command`echo hi && $(echo uh oh)`
+    describe("Unclosed subshell", async () => {
+      TestBuilder.command`echo hi && $(echo uh oh`.error("Unclosed command substitution").runAsTest('unclosed dollar')
+      TestBuilder.command`echo hi && $(echo uh oh)`
         .stdout("hi\n")
         .stderr("bun: command not found: uh\n")
         .exitCode(1)
-        .run();
+        .runAsTest('closed dolalr');
 
-      await TestBuilder.command`echo hi && \`echo uh oh`.error("Unclosed command substitution").run();
-      await TestBuilder.command`echo hi && \`echo uh oh\``
+      TestBuilder.command`echo hi && ${{ raw: "`echo uh oh" }}`.error("Unclosed command substitution").runAsTest('unclosed backtick');
+      TestBuilder.command`echo hi && ${{ raw: "`echo uh oh`" }}`
         .stdout("hi\n")
         .stderr("bun: command not found: uh\n")
         .exitCode(1)
-        .run();
+        .runAsTest('closed backtick');
 
-      await TestBuilder.command`echo hi && (echo uh oh`.error("Unclosed subshell").run();
-      await TestBuilder.command`echo hi && (echo uh oh)`
+      TestBuilder.command`echo hi && (echo uh oh`.error("Unclosed subshell").runAsTest('Unclosed subshell');
+      TestBuilder.command`echo hi && (echo uh oh)`
         .error(
           "Unexpected `(`, subshells are currently not supported right now. Escape the `(` or open a GitHub issue.",
         )
-        .run();
+        .runAsTest('closed subshell');
     });
   });
 });

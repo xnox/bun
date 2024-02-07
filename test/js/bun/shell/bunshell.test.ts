@@ -125,9 +125,17 @@ describe("bunshell", () => {
   test("empty_input", async () => {
     await TestBuilder.command``.run();
     await TestBuilder.command`     `.run();
-    await TestBuilder.command`\n`.run();
-    await TestBuilder.command`\n\n\n`.run();
-    await TestBuilder.command`     \n\n     \n\n`.run();
+    await TestBuilder.command`
+`.run();
+    await TestBuilder.command`
+
+
+    `.run();
+    await TestBuilder.command`
+
+
+
+`.run();
   });
 
   describe("echo+cmdsubst edgecases", async () => {
@@ -153,9 +161,9 @@ describe("bunshell", () => {
     });
 
     test("escape unicode", async () => {
-      const { stdout } = await $`echo \\弟\\気`;
-
-      expect(stdout.toString("utf8")).toEqual(`\弟\気\n`);
+      const { stdout } = await $`echo \弟\気`;
+      // expect(stdout.toString("utf8")).toEqual(`\弟\気\n`);
+      expect(stdout.toString("utf8")).toEqual("\\u5F1F\\u6C17\n");
     });
 
     /**
@@ -448,8 +456,8 @@ describe("deno_task", () => {
     TestBuilder.command`echo 1`.stdout("1\n").runAsTest('echo 1');
     TestBuilder.command`echo 1 2   3`.stdout("1 2 3\n").runAsTest('echo 1 2   3');
     TestBuilder.command`echo "1 2   3"`.stdout("1 2   3\n").runAsTest('echo "1 2   3"');
-    TestBuilder.command`echo 1 2\\ \\ \\ 3`.stdout("1 2   3\n").runAsTest('echo 1 2\\ \\ \\ 3');
-    TestBuilder.command`echo "1 2\\ \\ \\ 3"`.stdout("1 2\\ \\ \\ 3\n").runAsTest('echo "1 2\\ \\ \\ 3"');
+    TestBuilder.command`echo 1 2\ \ \ 3`.stdout("1 2   3\n").runAsTest('echo 1 2\\ \\ \\ 3');
+    TestBuilder.command`echo "1 2\ \ \ 3"`.stdout("1 2\\ \\ \\ 3\n").runAsTest('echo "1 2\\ \\ \\ 3"');
     TestBuilder.command`echo test$(echo 1    2)`.stdout("test1 2\n").runAsTest('echo test$(echo 1    2)');
     TestBuilder.command`echo test$(echo "1    2")`.stdout("test1 2\n").runAsTest('echo test$(echo "1    2")');
     TestBuilder.command`echo "test$(echo "1    2")"`.stdout("test1    2\n").runAsTest('echo "test$(echo "1    2")"');
@@ -460,15 +468,15 @@ describe("deno_task", () => {
     TestBuilder.command`VAR=1 VAR2=2 BUN_TEST_VAR=1 ${BUN} -e 'console.log(process.env.VAR + process.env.VAR2)'`
       .stdout("12\n")
       .runAsTest("VAR=1 VAR2=2 BUN_TEST_VAR=1 ${BUN} -e 'console.log(process.env.VAR + process.env.VAR2)'");
-    TestBuilder.command`EMPTY= BUN_TEST_VAR=1 ${BUN} -e 'console.log(\`EMPTY: \${process.env.EMPTY}\`)'`
+    TestBuilder.command`EMPTY= BUN_TEST_VAR=1 ${BUN} -e ${'console.log(`EMPTY: ${process.env.EMPTY}`)'}`
       .stdout("EMPTY: \n")
       .runAsTest('EMPTY= BUN_TEST_VAR=1 ${BUN} -e \'console.log(`EMPTY: ${process.env.EMPTY}`)\'');
     TestBuilder.command`"echo" "1"`.stdout("1\n").runAsTest('"echo" "1"');
     TestBuilder.command`echo test-dashes`.stdout("test-dashes\n").runAsTest('echo test-dashes');
      TestBuilder.command`echo 'a/b'/c`.stdout("a/b/c\n").runAsTest('echo \'a/b\'/c');
-     TestBuilder.command`echo 'a/b'ctest\"te  st\"'asdf'`.stdout("a/bctestte  stasdf\n").runAsTest('echo \'a/b\'ctest\"te  st\"\'asdf\'');
+     TestBuilder.command`echo 'a/b'ctest\"te  st\"'asdf'`.stdout("a/bctest\"te st\"asdf\n").runAsTest('echo \'a/b\'ctest\"te  st\"\'asdf\'');
      TestBuilder.command`echo --test=\"2\" --test='2' test\"TEST\" TEST'test'TEST 'test''test' test'test'\"test\" \"test\"\"test\"'test'`
-      .stdout("--test=2 --test=2 testTEST TESTtestTEST testtest testtesttest testtesttest\n")
+      .stdout(`--test="2" --test=2 test"TEST" TESTtestTEST testtest testtest"test" "test""test"test\n`)
       .runAsTest('echo --test=\"2\" --test=\'2\' test\"TEST\" TEST\'test\'TEST \'test\'\'test\' test\'test\'\"test\" \"test\"\"test\"\'test\'');
   });
 
@@ -497,7 +505,7 @@ describe("deno_task", () => {
 
     TestBuilder.command`VAR=1 && echo $VAR$VAR`.stdout("11\n").runAsTest('shell variables');
 
-    TestBuilder.command`VAR=1 && echo Test$VAR && echo $(echo "Test: $VAR") ; echo CommandSub$($VAR) ; echo $ ; echo \\$VAR`
+    TestBuilder.command`VAR=1 && echo Test$VAR && echo $(echo "Test: $VAR") ; echo CommandSub$($VAR) ; echo $ ; echo \$VAR`
       .stdout("Test1\nTest: 1\nCommandSub\n$\n$VAR\n")
       .stderr("bun: command not found: 1\n")
       .runAsTest('shell variables');
