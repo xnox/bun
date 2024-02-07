@@ -181,7 +181,8 @@ export function createBunShellTemplateFunction(ShellInterpreter) {
   }
 
   var BunShell = function BunShell() {
-    const core = new ShellInterpreter(...arguments);
+    const [first, ...rest] = arguments;
+    const core = new ShellInterpreter(first.raw, ...rest);
 
     const cwd = BunShell[cwdSymbol];
     const env = BunShell[envSymbol];
@@ -199,7 +200,8 @@ export function createBunShellTemplateFunction(ShellInterpreter) {
     }
 
     var Shell = function Shell() {
-      const core = new ShellInterpreter(...arguments);
+      const [first, ...rest] = arguments;
+      const core = new ShellInterpreter(first.raw, ...rest);
 
       const cwd = Shell[cwdSymbol];
       const env = Shell[envSymbol];
