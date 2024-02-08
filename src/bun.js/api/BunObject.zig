@@ -463,7 +463,7 @@ pub fn shell(
         return JSC.JSValue.jsUndefined();
     };
 
-    const template_args = callframe.argumentsPtr()[1..callframe.argumentsCount()];
+    const template_args: []const JSValue = if (callframe.argumentsCount() == 0) &[_]JSValue{} else callframe.argumentsPtr()[1..callframe.argumentsCount()];
     var jsobjs = std.ArrayList(JSValue).init(arena.allocator());
     var script = std.ArrayList(u8).init(arena.allocator());
     if (!(bun.shell.shellCmdFromJS(globalThis, string_args, template_args, &jsobjs, &script) catch {

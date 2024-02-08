@@ -5459,6 +5459,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                 vm,
                                 bun.ArenaAllocator.init(bun.default_allocator),
                                 JSC.Node.AsyncCPTaskVtable.from(&this.vtable),
+                                false,
                             );
                         } else {
                             _ = JSC.Node.AsyncCpTask.createMini(

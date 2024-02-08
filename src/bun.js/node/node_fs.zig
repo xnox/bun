@@ -339,7 +339,7 @@ pub const AsyncCpTask = struct {
         vm: *JSC.VirtualMachine,
         arena: bun.ArenaAllocator,
     )  JSC.JSValue {
-        const task = createWithVTable(globalObject, cp_args, vm, arena, AsyncCPTaskVtable.Dead);
+        const task = createWithVTable(globalObject, cp_args, vm, arena, AsyncCPTaskVtable.Dead, true);
         return task.promise.value();
     }
 
@@ -349,6 +349,7 @@ pub const AsyncCpTask = struct {
         vm: *JSC.VirtualMachine,
         arena: bun.ArenaAllocator,
         vtable: AsyncCPTaskVtable,
+        comptime enable_promise: bool,
     )  *ThisAsyncCpTask  {
         var task = bun.new(
             ThisAsyncCpTask,
@@ -361,6 +362,7 @@ pub const AsyncCpTask = struct {
                 .arena = arena,
                 .subtask_count = .{ .raw = 1 },
                 .vtable = vtable,
+                .promise = if (enable_promise) JSC.JSPromise.Strong.init(globalObject) else .{}
             },
         );
         task.ref.ref(vm);
