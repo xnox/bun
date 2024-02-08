@@ -4242,6 +4242,12 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         if (err.path.length() == 0) return this.fmtErrorArena(kind, "{s}\n", .{err.message.byteSlice()});
                         return this.fmtErrorArena(kind, "{s}: {s}\n", .{ err.message.byteSlice(), err.path });
                     },
+                    bun.shell.ShellErr => return switch (err) {
+                        .sys => this.taskErrorToString(kind, err.sys),
+                        .custom => this.fmtErrorArena(kind, "{s}\n", .{err.custom}),
+                        .invalid_arguments => this.fmtErrorArena(kind, "{s}\n", .{err.invalid_arguments.val}),
+                        .todo => this.fmtErrorArena(kind, "{s}\n", .{err.todo}),
+                    },
                     else => @compileError("Bad type: " ++ @typeName(err)),
                 }
             }
@@ -4967,6 +4973,12 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     done,
                 } = .idle,
 
+                const Form = enum {
+                    @"source_file target_file",
+                    @"source_file... target",
+                    @"-R source_file... target",
+                };
+
                 const Target = union(enum) {
                     file: [:0]const u8,
                     dir: struct { path: [:0]const u8, fd: ?bun.FileDescriptor = null },
@@ -5037,15 +5049,8 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                 const cwd_path = this.bltn.parentCmd().base.shell.cwdZ();
                                 for (exec.paths_to_copy) |path_raw| {
                                     const path = std.mem.span(path_raw);
-                                    const cp_task = bun.new(ShellCpTask, ShellCpTask{
-                                        .cp = this,
-                                        .opts = this.opts,
-                                        .src = path,
-                                        .tgt = exec.target_path,
-                                        .cwd_path = cwd_path,
-                                        .vtable = .{},
-                                    });
-                                    cp_task.run();
+                                    const cp_task = ShellCpTask.create(this, this.opts, 1 + exec.paths_to_copy.len, path, exec.target_path, cwd_path);
+                                    cp_task.schedule();
                                 }
                                 return;
                             },
@@ -5141,7 +5146,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     // Check for error, print it, but still want to print task output
                     if (err) |e| {
                         const error_string = this.bltn.taskErrorToString(.cp, e);
-                        this.state.exec.err = e;
+                        // this.state.exec.err = e;
 
                         if (this.bltn.stderr.needsIO()) {
                             queued = true;
@@ -5207,26 +5212,64 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     return this.next();
                 }
 
-                const ShellCpTask = struct {
+                pub const ShellCpTask = struct {
                     cp: *Cp,
 
                     opts: Opts,
+                    operands: usize = 0,
                     src: [:0]const u8,
                     tgt: [:0]const u8,
+                    src_copy: ?[:0]const u8 = null,
+                    tgt_copy: ?[:0]const u8 = null,
                     cwd_path: [:0]const u8,
                     verbose_output: ArrayList(u8) = ArrayList(u8).init(bun.default_allocator),
                     vtable: NodeCpVtable,
-                    err: ?JSC.SystemError = null,
+
+                    task: JSC.WorkPoolTask = .{ .callback = &runFromThreadPool },
+                    event_loop: EventLoopRef,
+                    concurrent_task: EventLoopTask = .{},
+                    err: ?bun.shell.ShellErr = null,
 
                     const print = bun.Output.scoped(.ShellCpTask, false);
 
                     fn deinit(this: *ShellCpTask) void {
+                        print("deinit", .{});
                         this.verbose_output.deinit();
+                        if (this.err) |e| {
+                            e.deinit(bun.default_allocator);
+                        }
+                        if (this.src_copy) |sc| {
+                            bun.default_allocator.free(sc);
+                        }
+                        if (this.tgt_copy) |tc| {
+                            bun.default_allocator.free(tc);
+                        }
+                        bun.destroy(this);
                     }
 
-                    fn onFinish(this: *ShellCpTask) void  {
-                        this.cp.onAsyncTaskDone(this);
-                        this.deinit();
+                    pub fn schedule(this: *@This()) void {
+                        print("schedule", .{});
+                        WorkPool.schedule(&this.task);
+                    }
+
+                    pub fn create(
+                        cp: *Cp,
+                        opts: Opts,
+                        operands: usize,
+                        src: [:0]const u8,
+                        tgt: [:0]const u8,
+                        cwd_path: [:0]const u8,
+                    ) *ShellCpTask {
+                        return bun.new(ShellCpTask, ShellCpTask{
+                            .cp = cp,
+                            .operands = operands,
+                            .opts = opts,
+                            .src = src,
+                            .tgt = tgt,
+                            .cwd_path = cwd_path,
+                            .vtable = .{},
+                            .event_loop = event_loop_ref.get(),
+                        });
                     }
 
                     fn takeOutput(this: *ShellCpTask) ArrayList(u8) {
@@ -5275,7 +5318,35 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         return .{ .result = os.S.ISDIR(stat.mode) };
                     }
 
-                    fn run(this: *ShellCpTask) void {
+                    fn enqueueToEventLoop(this: *ShellCpTask) void {
+                        if (comptime EventLoopKind == .js) {
+                            this.event_loop.enqueueTaskConcurrent(this.concurrent_task.from(this, .manual_deinit));
+                        } else {
+                            this.event_loop.enqueueTaskConcurrent(this.concurrent_task.from(this, "runFromMainThreadMini"));
+                        }
+                    }
+
+                    pub fn runFromMainThread(this: *ShellCpTask) void {
+                        print("runFromMainThread", .{});
+                        this.cp.onAsyncTaskDone(this);
+                        this.deinit();
+                    }
+
+                    pub fn runFromMainThreadMini(this: *ShellCpTask, _: *void) void {
+                        this.runFromMainThread();
+                    }
+
+                    pub fn runFromThreadPool(task: *WorkPoolTask) void {
+                        print("runFromThreadPool", .{});
+                        var this = @fieldParentPtr(@This(), "task", task);
+                        if (this.runFromThreadPoolImpl())  |e| {
+                            this.err = e;
+                            this.enqueueToEventLoop();
+                            return;
+                        }
+                    }
+
+                    fn runFromThreadPoolImpl(this: *ShellCpTask) ?bun.shell.ShellErr {
                         var buf2: [bun.MAX_PATH_BYTES]u8 = undefined;
                         var buf3: [bun.MAX_PATH_BYTES]u8 = undefined;
                         // We have to give an absolute path to our cp
@@ -5297,7 +5368,6 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             break :brk ResolvePath.joinZBuf(buf2[0..bun.MAX_PATH_BYTES], parts, .auto);
                         };
 
-
                         // Cases:
                         // SRC       DEST
                         // ----------------
@@ -5309,42 +5379,54 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         // If it doesn't exist we need to create it
                         const src_is_dir = switch (this.isDir(src)) {
                             .result => |x| x,
-                            .err => |e| {
-                                this.err = e.toSystemError();
-                                return this.onFinish();
-                            },
+                            .err => |e| return bun.shell.ShellErr.newSys(e),
                         };
 
-                        const tgt_is_dir = switch (this.isDir(tgt)) {
-                            .result => |x| x,
+                        // Any source directory without -R is an error
+                        if (src_is_dir and !this.opts.recursive) {
+                            const errmsg = std.fmt.allocPrint(bun.default_allocator, "{s} is a directory (not copied)", .{src}) catch bun.outOfMemory();
+                            return .{ .custom = errmsg };
+                        }
+
+                        const tgt_is_dir: bool, const tgt_exists: bool = switch (this.isDir(tgt)) {
+                            .result => |is_dir| .{is_dir, true},
                             .err => |e| brk: {
                                 if (e.getErrno() == bun.C.E.NOENT) {
                                     // If it has a trailing directory separator, its a directory
-                                    // Otherwise its a directory if src is a directory
-                                    const is_dir = hasTrailingSep(tgt) or src_is_dir;
-                                    if (is_dir) {
-                                        var nodefs = JSC.Node.NodeFS{};
-                                        const tgt_pathlike = JSC.Node.PathLike{ .string = bun.PathString.init(tgt)};
-                                        var dest_buf: bun.OSPathBuffer = undefined;
-                                        const dest = tgt_pathlike.osPath(@ptrCast(&dest_buf));
-                                        if (ensureDest(&nodefs, dest).asErr()) |err|  {
-                                            this.err = err.toSystemError();
-                                            return this.onFinish();
-                                        }
-                                    }
-                                    break :brk is_dir;
+                                    const is_dir = hasTrailingSep(tgt);
+                                    break :brk .{ is_dir, false };
                                 }
-                                this.err = e.toSystemError();
-                                return this.onFinish();
+                                return bun.shell.ShellErr.newSys(e);
                             },
                         };
 
-                        if (!tgt_is_dir and src_is_dir) {
-                            this.err = Syscall.Error.fromCode(bun.C.E.ISDIR, .TODO).withPath(src).toSystemError();
-                            return this.onFinish();
+                        // The logic here follows the POSIX spec:
+                        //   https://man7.org/linux/man-pages/man1/cp.1p.html
+                        //
+                        // Handle the "1st synopsis": source_file -> target_file
+                        if (!src_is_dir and !tgt_is_dir and this.operands == 2) {
+                            // Don't need to do anything here
                         }
-
-                        if (tgt_is_dir) {
+                        // Handle the "2nd synopsis": -R source_files... -> target
+                        else if (this.opts.recursive) {
+                            if (tgt_exists) {
+                                const basename = ResolvePath.basename(src[0..src.len]);
+                                const parts: []const []const u8 = &.{
+                                    tgt[0..tgt.len],
+                                    basename,
+                                };
+                                tgt = ResolvePath.joinZBuf(buf3[0..bun.MAX_PATH_BYTES], parts, .auto);
+                            } else if (this.operands == 2) {
+                                // source_dir -> new_target_dir
+                            } else {
+                                const errmsg = std.fmt.allocPrint(bun.default_allocator, "directory {s} does not exist", .{tgt}) catch bun.outOfMemory();
+                                return .{ .custom = errmsg };
+                            }
+                        }
+                        // Handle the "3rd synopsis": source_files... -> target
+                        else {
+                            if (src_is_dir) return .{ .custom = std.fmt.allocPrint(bun.default_allocator, "{s} is a directory (not copied)", .{src}) catch bun.outOfMemory() };
+                            if (!tgt_exists or !tgt_is_dir) return .{ .custom = std.fmt.allocPrint(bun.default_allocator, "{s} is not a directory", .{tgt}) catch bun.outOfMemory() };
                             const basename = ResolvePath.basename(src[0..src.len]);
                             const parts: []const []const u8 = &.{
                                 tgt[0..tgt.len],
@@ -5353,23 +5435,28 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             tgt = ResolvePath.joinZBuf(buf3[0..bun.MAX_PATH_BYTES], parts, .auto);
                         }
 
+
+                        this.src_copy = bun.default_allocator.dupeZ(u8, src[0..src.len]) catch bun.outOfMemory();
+                        this.tgt_copy = bun.default_allocator.dupeZ(u8, tgt[0..tgt.len]) catch bun.outOfMemory();
                         const args = JSC.Node.Arguments.Cp{
-                            .src = JSC.Node.PathLike{ .string = bun.PathString.init(src) },
-                            .dest = JSC.Node.PathLike{ .string = bun.PathString.init(tgt) },
+                            .src = JSC.Node.PathLike{ .string = bun.PathString.init(this.src_copy.?) },
+                            .dest = JSC.Node.PathLike{ .string = bun.PathString.init(this.tgt_copy.?) },
                             .flags = .{
                                 .mode = @enumFromInt(0),
                                 .recursive = this.opts.recursive,
-                                .force = false,
+                                .force = true,
                                 .errorOnExist = false,
                             },
                         };
 
+                        print("Scheduling {s} -> {s}", .{this.src_copy.?, this.tgt_copy.?});
                         if (comptime EventLoopKind == .js) {
-                            const global = this.cp.bltn.parentCmd().base.interpreter.global;
+                            const vm: *JSC.VirtualMachine = this.event_loop.getVmImpl();
+                            print("Yoops", .{});
                             _ = JSC.Node.AsyncCpTask.createWithVTable(
-                                global,
+                                vm.global,
                                 args,
-                                global.bunVM(),
+                                vm,
                                 bun.ArenaAllocator.init(bun.default_allocator),
                                 JSC.Node.AsyncCPTaskVtable.from(&this.vtable),
                             );
@@ -5380,6 +5467,16 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                 JSC.Node.AsyncCPTaskVtable.from(&this.vtable),
                             );
                         }
+
+                        return null;
+                    }
+
+                    fn onSubtaskFinish(this: *ShellCpTask, err: Maybe(void)) void {
+                        print("onSubtaskFinish", .{});
+                        if (err.asErr()) |e| {
+                            this.err = bun.shell.ShellErr.newSys(e);
+                        }
+                        this.enqueueToEventLoop();
                     }
 
                     const NodeCpVtable = struct {
@@ -5388,15 +5485,13 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         }
 
                         pub fn onCopy(this: *NodeCpVtable, src: [:0]const u8, dest: [:0]const u8) void {
+                            if (!this.shellTask().opts.verbose) return;
                             var writer = this.shellTask().verbose_output.writer();
                             writer.print("{s} -> {s}\n", .{ src, dest }) catch bun.outOfMemory();
                         }
 
                         pub fn onFinish(this: *NodeCpVtable, result: Maybe(void)) void {
-                            if (result.asErr()) |e| {
-                                this.shellTask().err = e.toSystemError();
-                            }
-                            this.shellTask().onFinish();
+                            this.shellTask().onSubtaskFinish(result);
                         }
                     };
                 };

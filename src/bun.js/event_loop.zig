@@ -359,6 +359,7 @@ const ShellLsTask = bun.shell.Interpreter.Builtin.Ls.ShellLsTask;
 const ShellMvCheckTargetTask = bun.shell.Interpreter.Builtin.Mv.ShellMvCheckTargetTask;
 const ShellMvBatchedTask = bun.shell.Interpreter.Builtin.Mv.ShellMvBatchedTask;
 const ShellSubprocessResultTask = JSC.Subprocess.WaiterThread.ShellSubprocessQueue.ResultTask;
+const ShellCpTask = bun.shell.Interpreter.Builtin.Cp.ShellCpTask;
 const TimerReference = JSC.BunTimer.Timeout.TimerReference;
 // Task.get(ReadFileTask) -> ?ReadFileTask
 pub const Task = TaggedPointerUnion(.{
@@ -431,6 +432,7 @@ pub const Task = TaggedPointerUnion(.{
     ShellMvCheckTargetTask,
     ShellMvBatchedTask,
     ShellLsTask,
+    ShellCpTask,
     TimerReference,
 });
 const UnboundedQueue = @import("./unbounded_queue.zig").UnboundedQueue;
@@ -739,6 +741,11 @@ pub const EventLoop = struct {
                 },
                 @field(Task.Tag, typeBaseName(@typeName(ShellLsTask))) => {
                     var shell_ls_task: *ShellLsTask = task.get(ShellLsTask).?;
+                    shell_ls_task.runFromMainThread();
+                    // shell_ls_task.deinit();
+                },
+                @field(Task.Tag, typeBaseName(@typeName(ShellCpTask))) => {
+                    var shell_ls_task: *ShellCpTask = task.get(ShellCpTask).?;
                     shell_ls_task.runFromMainThread();
                     // shell_ls_task.deinit();
                 },

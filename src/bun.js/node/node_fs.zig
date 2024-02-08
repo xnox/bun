@@ -353,11 +353,10 @@ pub const AsyncCpTask = struct {
         var task = bun.new(
             ThisAsyncCpTask,
             ThisAsyncCpTask{
-                .promise = JSC.JSPromise.Strong.init(globalObject),
                 .args = cp_args,
                 .has_result = .{ .raw = false },
                 .result = undefined,
-                .loop = EventLoopHandle.init(globalObject.bunVM()),
+                .loop = .{ .js = vm.event_loop },
                 .tracker = JSC.AsyncTaskTracker.init(vm),
                 .arena = arena,
                 .subtask_count = .{ .raw = 1 },
