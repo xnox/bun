@@ -182,7 +182,7 @@ export function createBunShellTemplateFunction(ShellInterpreter) {
 
   var BunShell = function BunShell() {
     const [first, ...rest] = arguments;
-    if (typeof first.raw !== 'string') throw new Error('Please use `$` as a tagged template function: $`cmd arg1 arg 2`')
+    if (first.raw === undefined) throw new Error('Please use `$` as a tagged template function: $`cmd arg1 arg 2`')
     const core = new ShellInterpreter(first.raw, ...rest);
 
     const cwd = BunShell[cwdSymbol];
@@ -202,7 +202,7 @@ export function createBunShellTemplateFunction(ShellInterpreter) {
 
     var Shell = function Shell() {
       const [first, ...rest] = arguments;
-      if (typeof first.raw !== 'string') throw new Error('Please use `$` as a tagged template function: $`cmd arg1 arg 2`')
+      if (first.raw === undefined) throw new Error('Please use `$` as a tagged template function: $`cmd arg1 arg 2`')
       const core = new ShellInterpreter(first.raw, ...rest);
 
       const cwd = Shell[cwdSymbol];
