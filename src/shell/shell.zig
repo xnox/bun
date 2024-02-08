@@ -2496,7 +2496,7 @@ pub fn shellCmdFromJS(
         // const str = js_value.getZigString(globalThis);
         // try script.appendSlice(str.full());
         if (i < last) {
-            if (i < template_args.len) {
+            if (i >= template_args.len) {
                 globalThis.throw("Invalid template arguments", .{});
                 return false;
             }
