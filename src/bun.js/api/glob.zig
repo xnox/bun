@@ -443,6 +443,7 @@ pub fn __scan(this: *Glob, globalThis: *JSGlobalObject, callframe: *JSC.CallFram
 }
 
 pub fn __scanSync(this: *Glob, globalThis: *JSGlobalObject, callframe: *JSC.CallFrame) callconv(.C) JSC.JSValue {
+    const log = bun.Output.scoped(.GlobScanSync, false);
     const alloc = getAllocator(globalThis);
 
     const arguments_ = callframe.arguments(1);
@@ -450,22 +451,26 @@ pub fn __scanSync(this: *Glob, globalThis: *JSGlobalObject, callframe: *JSC.Call
     defer arguments.deinit();
 
     var arena = std.heap.ArenaAllocator.init(alloc);
+    log("Walker init", .{});
     var globWalker = this.makeGlobWalker(globalThis, &arguments, "scanSync", alloc, &arena) orelse {
         arena.deinit();
         return .undefined;
     };
     defer globWalker.deinit(true);
 
+    log("Walker walk start", .{});
     switch (globWalker.walk() catch {
         globalThis.throw("Out of memory", .{});
         return .undefined;
     }) {
         .err => |err| {
+        log("Walker fail", .{});
             globalThis.throwValue(err.toJSC(globalThis));
             return JSValue.undefined;
         },
         .result => {},
     }
+    log("Walker success", .{});
 
     const matchedPaths = globWalkResultToJS(globWalker, globalThis);
 
