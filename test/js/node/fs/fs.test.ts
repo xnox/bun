@@ -2,7 +2,7 @@
 import { describe, expect, it } from "bun:test";
 import { dirname, resolve, relative } from "node:path";
 import { promisify } from "node:util";
-import { bunEnv, bunExe, gc, getMaxFD } from "harness";
+import { bunEnv, bunExe, gc, getMaxFD, isWindows } from "harness";
 import { isAscii } from "node:buffer";
 import fs, {
   closeSync,
@@ -38,8 +38,6 @@ import fs, {
   readvSync,
   fstatSync,
 } from "node:fs";
-
-const isWindows = process.platform === "win32";
 
 import _promises from "node:fs/promises";
 
@@ -1165,6 +1163,15 @@ it("readlink", () => {
   expect(readlinkSync(actual)).toBe(realpathSync(import.meta.path));
 });
 
+it.if(isWindows)("symlink on windows with forward slashes", async () => {
+  const r = join(tmpdir(), Math.random().toString(32));
+  await fs.promises.rm(join(r, "files/2024"), { recursive: true, force: true });
+  await fs.promises.mkdir(join(r, "files/2024"), { recursive: true });
+  await fs.promises.writeFile(join(r, "files/2024/123.txt"), "text");
+  await fs.promises.symlink("files/2024/123.txt", join(r, "file-sym.txt"));
+  expect(await fs.promises.readlink(join(r, "file-sym.txt"))).toBe("files\\2024\\123.txt");
+});
+
 it("realpath async", async () => {
   const actual = join(tmpdir(), Math.random().toString(32) + "-fs-realpath.txt");
   try {
@@ -2045,14 +2052,14 @@ describe("fs/promises", () => {
 
       const pending = new Array(iterCount);
       for (let i = 0; i < iterCount; i++) {
-        pending[i] = promises.readdir(join(notfound, i), { recursive: true, withFileTypes });
+        pending[i] = promises.readdir(join(notfound, `${i}`), { recursive: true, withFileTypes });
       }
 
       const results = await Promise.allSettled(pending);
       for (let i = 0; i < iterCount; i++) {
         expect(results[i].status).toBe("rejected");
         expect(results[i].reason!.code).toBe("ENOENT");
-        expect(results[i].reason!.path).toBe(join(notfound, i));
+        expect(results[i].reason!.path).toBe(join(notfound, `${i}`));
       }
 
       const newMaxFD = getMaxFD();

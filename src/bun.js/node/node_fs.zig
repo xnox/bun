@@ -249,7 +249,12 @@ pub const AsyncCPTaskVtable = struct {
     onFinish: *const (fn (*anyopaque, Maybe(void)) void) = undefined,
     is_shell: bool = true,
 
-    pub const Dead = AsyncCPTaskVtable{ .ctx = @ptrFromInt(0xDEADBEEF), .onCopy = deadOnCopy, .onFinish = deadOnFinish, .is_shell = false, };
+    pub const Dead = AsyncCPTaskVtable{
+        .ctx = @ptrFromInt(0xDEADBEEF),
+        .onCopy = deadOnCopy,
+        .onFinish = deadOnFinish,
+        .is_shell = false,
+    };
 
     pub fn deadOnCopy(ctx: *anyopaque, src: [:0]const u8, dest: [:0]const u8) void {
         _ = ctx;
@@ -319,7 +324,7 @@ pub const AsyncCpTask = struct {
     loop: EventLoopHandle,
     promise: JSC.JSPromise.Strong = .{},
     tracker: JSC.AsyncTaskTracker,
-    mini_task:  JSC.AnyTaskWithExtraContext = .{},
+    mini_task: JSC.AnyTaskWithExtraContext = .{},
 
     vtable: AsyncCPTaskVtable = AsyncCPTaskVtable.Dead,
 
@@ -338,7 +343,7 @@ pub const AsyncCpTask = struct {
         cp_args: Arguments.Cp,
         vm: *JSC.VirtualMachine,
         arena: bun.ArenaAllocator,
-    )  JSC.JSValue {
+    ) JSC.JSValue {
         const task = createWithVTable(globalObject, cp_args, vm, arena, AsyncCPTaskVtable.Dead, true);
         return task.promise.value();
     }
@@ -350,20 +355,10 @@ pub const AsyncCpTask = struct {
         arena: bun.ArenaAllocator,
         vtable: AsyncCPTaskVtable,
         comptime enable_promise: bool,
-    )  *ThisAsyncCpTask  {
+    ) *ThisAsyncCpTask {
         var task = bun.new(
             ThisAsyncCpTask,
-            ThisAsyncCpTask{
-                .args = cp_args,
-                .has_result = .{ .raw = false },
-                .result = undefined,
-                .loop = .{ .js = vm.event_loop },
-                .tracker = JSC.AsyncTaskTracker.init(vm),
-                .arena = arena,
-                .subtask_count = .{ .raw = 1 },
-                .vtable = vtable,
-                .promise = if (enable_promise) JSC.JSPromise.Strong.init(globalObject) else .{}
-            },
+            ThisAsyncCpTask{ .args = cp_args, .has_result = .{ .raw = false }, .result = undefined, .loop = .{ .js = vm.event_loop }, .tracker = JSC.AsyncTaskTracker.init(vm), .arena = arena, .subtask_count = .{ .raw = 1 }, .vtable = vtable, .promise = if (enable_promise) JSC.JSPromise.Strong.init(globalObject) else .{} },
         );
         task.ref.ref(vm);
         task.args.src.toThreadSafe();
@@ -488,180 +483,6 @@ pub const AsyncCpTask = struct {
         };
     }
 };
-
-/// This task is used by `AsyncCpTask/fs.promises.cp` to copy a single file.
-/// When clonefile cannot be used, this task is started once per file.
-pub const AsyncCpSingleTask = struct {
-    cp_task: *AsyncCpTask,
-    src: bun.OSPathSliceZ,
-    dest: bun.OSPathSliceZ,
-    task: JSC.WorkPoolTask = .{ .callback = &workPoolCallback },
-
-    pub fn create(
-        parent: *AsyncCpTask,
-        src: bun.OSPathSliceZ,
-        dest: bun.OSPathSliceZ,
-    ) void {
-        var task = bun.new(AsyncCpSingleTask, .{
-            .cp_task = parent,
-            .src = src,
-            .dest = dest,
-        });
-
-        JSC.WorkPool.schedule(&task.task);
-    }
-
-    fn workPoolCallback(task: *JSC.WorkPoolTask) void {
-        var this: *AsyncCpSingleTask = @fieldParentPtr(AsyncCpSingleTask, "task", task);
-
-        // TODO: error strings on node_fs will die
-        var node_fs = NodeFS{};
-
-        const args = this.cp_task.args;
-        const result = node_fs._copySingleFileSync(
-            this.src,
-            this.dest,
-            @enumFromInt((if (args.flags.errorOnExist or !args.flags.force) Constants.COPYFILE_EXCL else @as(u8, 0))),
-            null,
-        );
-
-        brk: {
-            switch (result) {
-                .err => |err| {
-                    if (err.errno == @intFromEnum(E.EXIST) and !args.flags.errorOnExist) {
-                        break :brk;
-                    }
-                    this.cp_task.finishConcurrently(result);
-                    this.deinit();
-                    return;
-                },
-                .result => {
-                    this.cp_task.onCopy(this.src, this.dest);
-                },
-            }
-        }
-
-        const old_count = this.cp_task.subtask_count.fetchSub(1, .Monotonic);
-        if (old_count == 1) {
-            this.cp_task.finishConcurrently(Maybe(Return.Cp).success);
-        }
-
-        this.deinit();
-    }
-
-    pub fn deinit(this: *AsyncCpSingleTask) void {
-        // There is only one path buffer for both paths. 2 extra bytes are the nulls at the end of each
-        bun.default_allocator.free(this.src.ptr[0 .. this.src.len + this.dest.len + 2]);
-
-        bun.destroy(this);
-    }
-};
-
-// pub const AsyncCpTask = struct {
-//     promise: JSC.JSPromise.Strong,
-//     args: Arguments.Cp,
-//     globalObject: *JSC.JSGlobalObject,
-//     task: JSC.WorkPoolTask = .{ .callback = &workPoolCallback },
-//     result: JSC.Maybe(Return.Cp),
-//     ref: bun.Async.KeepAlive = .{},
-//     arena: bun.ArenaAllocator,
-//     tracker: JSC.AsyncTaskTracker,
-//     has_result: std.atomic.Value(bool),
-//     /// On each creation of a `AsyncCpSingleFileTask`, this is incremented.
-//     /// When each task is finished, decrement.
-//     /// The maintask thread starts this at 1 and decrements it at the end, to avoid the promise being resolved while new tasks may be added.
-//     subtask_count: std.atomic.Value(usize),
-
-//     pub fn create(
-//         globalObject: *JSC.JSGlobalObject,
-//         cp_args: Arguments.Cp,
-//         vm: *JSC.VirtualMachine,
-//         arena: bun.ArenaAllocator,
-//     ) JSC.JSValue {
-//         var task = bun.new(
-//             AsyncCpTask,
-//             AsyncCpTask{
-//                 .promise = JSC.JSPromise.Strong.init(globalObject),
-//                 .args = cp_args,
-//                 .has_result = .{ .raw = false },
-//                 .result = undefined,
-//                 .globalObject = globalObject,
-//                 .tracker = JSC.AsyncTaskTracker.init(vm),
-//                 .arena = arena,
-//                 .subtask_count = .{ .raw = 1 },
-//             },
-//         );
-//         task.ref.ref(vm);
-//         task.args.src.toThreadSafe();
-//         task.args.dest.toThreadSafe();
-//         task.tracker.didSchedule(globalObject);
-
-//         JSC.WorkPool.schedule(&task.task);
-
-//         return task.promise.value();
-//     }
-
-//     fn workPoolCallback(task: *JSC.WorkPoolTask) void {
-//         const this: *AsyncCpTask = @fieldParentPtr(AsyncCpTask, "task", task);
-
-//         var node_fs = NodeFS{};
-//         node_fs.cpAsync(this);
-//     }
-
-//     /// May be called from any thread (the subtasks)
-//     fn finishConcurrently(this: *AsyncCpTask, result: Maybe(Return.Cp)) void {
-//         if (this.has_result.cmpxchgStrong(false, true, .Monotonic, .Monotonic)) |_| {
-//             return;
-//         }
-
-//         this.result = result;
-
-//         if (this.result == .err) {
-//             this.result.err.path = bun.default_allocator.dupe(u8, this.result.err.path) catch "";
-//         }
-
-//         this.globalObject.bunVMConcurrently().eventLoop().enqueueTaskConcurrent(JSC.ConcurrentTask.fromCallback(this, runFromJSThread));
-//     }
-
-//     fn runFromJSThread(this: *AsyncCpTask) void {
-//         const globalObject = this.globalObject;
-//         var success = @as(JSC.Maybe(Return.Cp).Tag, this.result) == .result;
-//         const result = switch (this.result) {
-//             .err => |err| err.toJSC(globalObject),
-//             .result => |*res| brk: {
-//                 const out = globalObject.toJS(res, .temporary);
-//                 success = out != .zero;
-
-//                 break :brk out;
-//             },
-//         };
-//         var promise_value = this.promise.value();
-//         var promise = this.promise.get();
-//         promise_value.ensureStillAlive();
-
-//         const tracker = this.tracker;
-//         tracker.willDispatch(globalObject);
-//         defer tracker.didDispatch(globalObject);
-
-//         this.deinit();
-//         switch (success) {
-//             false => {
-//                 promise.reject(globalObject, result);
-//             },
-//             true => {
-//                 promise.resolve(globalObject, result);
-//             },
-//         }
-//     }
-
-//     pub fn deinit(this: *AsyncCpTask) void {
-//         this.ref.unref(this.globalObject.bunVM());
-//         this.args.deinit();
-//         this.promise.strong.deinit();
-//         this.arena.deinit();
-//         bun.destroy(this);
-//     }
-// };
 
 pub const AsyncReaddirRecursiveTask = struct {
     promise: JSC.JSPromise.Strong,
@@ -998,6 +819,74 @@ pub const AsyncReaddirRecursiveTask = struct {
         this.clearResultList();
         this.promise.strong.deinit();
         this.destroy();
+    }
+};
+
+/// This task is used by `AsyncCpTask/fs.promises.cp` to copy a single file.
+/// When clonefile cannot be used, this task is started once per file.
+pub const AsyncCpSingleFileTask = struct {
+    cp_task: *AsyncCpTask,
+    src: bun.OSPathSliceZ,
+    dest: bun.OSPathSliceZ,
+    task: JSC.WorkPoolTask = .{ .callback = &workPoolCallback },
+
+    pub fn create(
+        parent: *AsyncCpTask,
+        src: bun.OSPathSliceZ,
+        dest: bun.OSPathSliceZ,
+    ) void {
+        var task = bun.new(AsyncCpSingleFileTask, .{
+            .cp_task = parent,
+            .src = src,
+            .dest = dest,
+        });
+
+        JSC.WorkPool.schedule(&task.task);
+    }
+
+    fn workPoolCallback(task: *JSC.WorkPoolTask) void {
+        var this: *AsyncCpSingleFileTask = @fieldParentPtr(AsyncCpSingleFileTask, "task", task);
+
+        // TODO: error strings on node_fs will die
+        var node_fs = NodeFS{};
+
+        const args = this.cp_task.args;
+        const result = node_fs._copySingleFileSync(
+            this.src,
+            this.dest,
+            @enumFromInt((if (args.flags.errorOnExist or !args.flags.force) Constants.COPYFILE_EXCL else @as(u8, 0))),
+            null,
+        );
+
+        brk: {
+            switch (result) {
+                .err => |err| {
+                    if (err.errno == @intFromEnum(E.EXIST) and !args.flags.errorOnExist) {
+                        break :brk;
+                    }
+                    this.cp_task.finishConcurrently(result);
+                    this.deinit();
+                    return;
+                },
+                .result => {
+                    this.cp_task.onCopy(this.src, this.dest);
+                },
+            }
+        }
+
+        const old_count = this.cp_task.subtask_count.fetchSub(1, .Monotonic);
+        if (old_count == 1) {
+            this.cp_task.finishConcurrently(Maybe(Return.Cp).success);
+        }
+
+        this.deinit();
+    }
+
+    pub fn deinit(this: *AsyncCpSingleFileTask) void {
+        // There is only one path buffer for both paths. 2 extra bytes are the nulls at the end of each
+        bun.default_allocator.free(this.src.ptr[0 .. this.src.len + this.dest.len + 2]);
+
+        bun.destroy(this);
     }
 };
 
@@ -5562,8 +5451,13 @@ pub const NodeFS = struct {
                 // On Windows, we potentially mutate the path in posixToPlatformInPlace
                 // We cannot mutate JavaScript strings in-place. That will break many things.
                 // So we must always copy the path string on Windows.
-                path = args.file.path.sliceZWithForceCopy(pathbuf, Environment.isWindows);
-                bun.path.posixToPlatformInPlace(u8, @constCast(path));
+                path = path: {
+                    const temp_path = args.file.path.sliceZWithForceCopy(pathbuf, Environment.isWindows);
+                    if (Environment.isWindows) {
+                        bun.path.posixToPlatformInPlace(u8, temp_path);
+                    }
+                    break :path temp_path;
+                };
 
                 var is_dirfd_different = false;
                 var dirfd = args.dirfd;
@@ -6004,8 +5898,18 @@ pub const NodeFS = struct {
         var to_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
 
         if (Environment.isWindows) {
+            const target: [:0]u8 = args.old_path.sliceZWithForceCopy(&this.sync_error_buf, true);
+            // UV does not normalize slashes in symlink targets, but Node does
+            // See https://github.com/oven-sh/bun/issues/8273
+            //
+            // TODO: investigate if simd can be easily used here
+            for (target) |*c| {
+                if (c.* == '/') {
+                    c.* = '\\';
+                }
+            }
             return Syscall.symlinkUV(
-                args.old_path.sliceZ(&this.sync_error_buf),
+                target,
                 args.new_path.sliceZ(&to_buf),
                 switch (args.link_type) {
                     .file => 0,
@@ -6064,16 +5968,12 @@ pub const NodeFS = struct {
     pub fn watchFile(_: *NodeFS, args: Arguments.WatchFile, comptime flavor: Flavor) Maybe(Return.WatchFile) {
         std.debug.assert(flavor == .sync);
 
-        if (comptime Environment.isWindows) {
-            args.global_this.throwTODO("watch is not supported on Windows yet");
-            return Maybe(Return.Watch){ .result = JSC.JSValue.undefined };
-        }
-
         const watcher = args.createStatWatcher() catch |err| {
             const buf = std.fmt.allocPrint(bun.default_allocator, "{s} watching {}", .{ @errorName(err), bun.fmt.QuotedFormatter{ .text = args.path.slice() } }) catch unreachable;
             defer bun.default_allocator.free(buf);
             args.global_this.throwValue((JSC.SystemError{
                 .message = bun.String.init(buf),
+                .code = bun.String.init(@errorName(err)),
                 .path = bun.String.init(args.path.slice()),
             }).toErrorInstance(args.global_this));
             return Maybe(Return.Watch){ .result = JSC.JSValue.undefined };
@@ -6171,6 +6071,8 @@ pub const NodeFS = struct {
             defer bun.default_allocator.free(buf);
             args.global_this.throwValue((JSC.SystemError{
                 .message = bun.String.init(buf),
+                .code = bun.String.init(@errorName(err)),
+                .syscall = bun.String.static("watch"),
                 .path = bun.String.init(args.path.slice()),
             }).toErrorInstance(args.global_this));
             return Maybe(Return.Watch){ .result = JSC.JSValue.undefined };
@@ -6752,7 +6654,6 @@ pub const NodeFS = struct {
             };
 
             if (!os.S.ISDIR(stat_.mode)) {
-
                 // This is the only file, there is no point in dispatching subtasks
                 const r = this._copySingleFileSync(
                     src,
@@ -6790,7 +6691,6 @@ pub const NodeFS = struct {
     fn _cpAsyncDirectory(
         this: *NodeFS,
         task: *AsyncCpTask,
-        args: Arguments.Cp.Flags,
         src_buf: *bun.OSPathBuffer,
         src_dir_len: PathString.PathInt,
         dest_buf: *bun.OSPathBuffer,

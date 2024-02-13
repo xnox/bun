@@ -341,7 +341,7 @@ import { $ } from "bun";
 
 await $`echo ${{ raw: '$(foo) `bar` "baz"' }}`
 // => bun: command not found: foo
-// => bun: command not found: bara
+// => bun: command not found: bar
 // => baz
 ```
 

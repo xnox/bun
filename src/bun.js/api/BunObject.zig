@@ -707,7 +707,7 @@ pub fn which(
     }
 
     path_str = ZigString.Slice.fromUTF8NeverFree(
-        globalThis.bunVM().bundler.env.map.get("PATH") orelse "",
+        globalThis.bunVM().bundler.env.get("PATH") orelse "",
     );
     cwd_str = ZigString.Slice.fromUTF8NeverFree(
         globalThis.bunVM().bundler.fs.top_level_dir,
@@ -1042,14 +1042,30 @@ pub fn openInEditor(
 }
 
 pub fn getPublicPath(to: string, origin: URL, comptime Writer: type, writer: Writer) void {
-    return getPublicPathWithAssetPrefix(to, VirtualMachine.get().bundler.fs.top_level_dir, origin, VirtualMachine.get().bundler.options.routes.asset_prefix_path, comptime Writer, writer);
+    return getPublicPathWithAssetPrefix(
+        to,
+        VirtualMachine.get().bundler.fs.top_level_dir,
+        origin,
+        VirtualMachine.get().bundler.options.routes.asset_prefix_path,
+        comptime Writer,
+        writer,
+        .loose,
+    );
 }
 
-pub fn getPublicPathWithAssetPrefix(to: string, dir: string, origin: URL, asset_prefix: string, comptime Writer: type, writer: Writer) void {
+pub fn getPublicPathWithAssetPrefix(
+    to: string,
+    dir: string,
+    origin: URL,
+    asset_prefix: string,
+    comptime Writer: type,
+    writer: Writer,
+    comptime platform: bun.path.Platform,
+) void {
     const relative_path = if (strings.hasPrefix(to, dir))
         strings.withoutTrailingSlash(to[dir.len..])
     else
-        VirtualMachine.get().bundler.fs.relative(dir, to);
+        VirtualMachine.get().bundler.fs.relativePlatform(dir, to, platform);
     if (origin.isAbsolute()) {
         if (strings.hasPrefix(relative_path, "..") or strings.hasPrefix(relative_path, "./")) {
             writer.writeAll(origin.origin) catch return;
@@ -5171,7 +5187,7 @@ pub const EnvironmentVariables = struct {
         var vm = globalObject.bunVM();
         var sliced = name.toSlice(vm.allocator);
         defer sliced.deinit();
-        const value = vm.bundler.env.map.get(sliced.slice()) orelse return null;
+        const value = vm.bundler.env.get(sliced.slice()) orelse return null;
         return ZigString.initUTF8(value);
     }
 };

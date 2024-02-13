@@ -16,10 +16,10 @@
 //!     `defer` some code, then try to yield execution to some state machine struct,
 //!     and it immediately finishes, it will deinit itself and the defer code might
 //!     use undefined memory.
-const bun = @import("root").bun;
 const std = @import("std");
-const os = std.os;
 const builtin = @import("builtin");
+const bun = @import("root").bun;
+const os = std.os;
 const Arena = std.heap.ArenaAllocator;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
@@ -40,9 +40,9 @@ const TaggedPointerUnion = @import("../tagged_pointer.zig").TaggedPointerUnion;
 const TaggedPointer = @import("../tagged_pointer.zig").TaggedPointer;
 pub const WorkPoolTask = @import("../work_pool.zig").Task;
 pub const WorkPool = @import("../work_pool.zig").WorkPool;
-const Maybe = @import("../bun.js/node/types.zig").Maybe;
 const windows = bun.windows;
 const uv = windows.libuv;
+const Maybe = JSC.Maybe;
 
 const Pipe = [2]bun.FileDescriptor;
 const shell = @import("./shell.zig");
@@ -5339,7 +5339,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     pub fn runFromThreadPool(task: *WorkPoolTask) void {
                         print("runFromThreadPool", .{});
                         var this = @fieldParentPtr(@This(), "task", task);
-                        if (this.runFromThreadPoolImpl())  |e| {
+                        if (this.runFromThreadPoolImpl()) |e| {
                             this.err = e;
                             this.enqueueToEventLoop();
                             return;
@@ -5389,7 +5389,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                         }
 
                         const tgt_is_dir: bool, const tgt_exists: bool = switch (this.isDir(tgt)) {
-                            .result => |is_dir| .{is_dir, true},
+                            .result => |is_dir| .{ is_dir, true },
                             .err => |e| brk: {
                                 if (e.getErrno() == bun.C.E.NOENT) {
                                     // If it has a trailing directory separator, its a directory
@@ -5435,7 +5435,6 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             tgt = ResolvePath.joinZBuf(buf3[0..bun.MAX_PATH_BYTES], parts, .auto);
                         }
 
-
                         this.src_copy = bun.default_allocator.dupeZ(u8, src[0..src.len]) catch bun.outOfMemory();
                         this.tgt_copy = bun.default_allocator.dupeZ(u8, tgt[0..tgt.len]) catch bun.outOfMemory();
                         const args = JSC.Node.Arguments.Cp{
@@ -5449,7 +5448,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                             },
                         };
 
-                        print("Scheduling {s} -> {s}", .{this.src_copy.?, this.tgt_copy.?});
+                        print("Scheduling {s} -> {s}", .{ this.src_copy.?, this.tgt_copy.? });
                         if (comptime EventLoopKind == .js) {
                             const vm: *JSC.VirtualMachine = this.event_loop.getVmImpl();
                             print("Yoops", .{});
@@ -5578,7 +5577,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                     fn parseShort(this: *Opts, char: u8, smallflags: []const u8, i: usize) ?ParseFlagResult {
                         switch (char) {
                             'f' => {
-                                return .{.unsupported = unsupportedFlag("-f")};
+                                return .{ .unsupported = unsupportedFlag("-f") };
                             },
                             'H' => {
                                 return .{ .unsupported = unsupportedFlag("-H") };
@@ -5609,7 +5608,7 @@ pub fn NewInterpreter(comptime EventLoopKind: JSC.EventLoopKind) type {
                                 return .continue_parsing;
                             },
                             else => {
-                                return .{ .illegal_option = smallflags[i ..] };
+                                return .{ .illegal_option = smallflags[i..] };
                             },
                         }
 
