@@ -6680,7 +6680,7 @@ pub const NodeFS = struct {
             return;
         }
 
-        const success = this._cpAsyncDirectory(task, args.flags, &src_buf, @intCast(src.len), &dest_buf, @intCast(dest.len));
+        const success = this._cpAsyncDirectory(task.args.flags, task, &src_buf, @intCast(src.len), &dest_buf, @intCast(dest.len));
         const old_count = task.subtask_count.fetchSub(1, .Monotonic);
         if (success and old_count == 1) {
             task.finishConcurrently(Maybe(Return.Cp).success);
@@ -6690,6 +6690,7 @@ pub const NodeFS = struct {
     // returns boolean `should_continue`
     fn _cpAsyncDirectory(
         this: *NodeFS,
+        args: Arguments.Cp.Flags,
         task: *AsyncCpTask,
         src_buf: *bun.OSPathBuffer,
         src_dir_len: PathString.PathInt,
@@ -6777,8 +6778,8 @@ pub const NodeFS = struct {
                     dest_buf[dest_dir_len + 1 + cname.len] = 0;
 
                     const should_continue = this._cpAsyncDirectory(
-                        task,
                         args,
+                        task,
                         src_buf,
                         @truncate(src_dir_len + 1 + cname.len),
                         dest_buf,
@@ -6807,7 +6808,7 @@ pub const NodeFS = struct {
                     @memcpy(path_buf[src_dir_len + 1 + cname.len + 1 + dest_dir_len + 1 .. src_dir_len + 1 + cname.len + 1 + dest_dir_len + 1 + cname.len], cname);
                     path_buf[src_dir_len + 1 + cname.len + 1 + dest_dir_len + 1 + cname.len] = 0;
 
-                    AsyncCpSingleTask.create(
+                    AsyncCpSingleFileTask.create(
                         task,
                         path_buf[0 .. src_dir_len + 1 + cname.len :0],
                         path_buf[src_dir_len + 1 + cname.len + 1 .. src_dir_len + 1 + cname.len + 1 + dest_dir_len + 1 + cname.len :0],
