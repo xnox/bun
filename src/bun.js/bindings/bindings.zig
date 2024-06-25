@@ -6567,26 +6567,30 @@ comptime {
 pub const DeferredError = struct {
     kind: Kind,
     code: JSC.Node.ErrorCode,
-    msg: ZigString,
+    msg: bun.String,
 
-    pub const Kind = enum { plainerror, typeerror, rangeerror };
+    pub const Kind = enum(u8) { Error, TypeError, RangeError };
+
+    extern fn Bun__createErrorInstanceWithKind(
+        globalObject: *JSC.JSGlobalObject,
+        kind: Kind,
+        code: ?*const bun.String,
+        message: ?*const bun.String,
+    ) JSValue;
 
     pub fn from(kind: Kind, code: JSC.Node.ErrorCode, comptime fmt: []const u8, args: anytype) DeferredError {
         return .{
             .kind = kind,
             .code = code,
-            .msg = ZigString.fromFmt(fmt, args),
+            .msg = if (std.meta.fields(@TypeOf(args)).len > 0) bun.String.createFormat(fmt, args) catch bun.outOfMemory() else bun.String.init(fmt),
         };
     }
 
-    pub fn toError(this: *const DeferredError, globalThis: *JSGlobalObject) JSValue {
-        defer if (bun.Mimalloc.mi_is_in_heap_region(this.msg.slice().ptr)) this.msg.deinitGlobal() else {};
-        const err = switch (this.kind) {
-            .plainerror => this.msg.toErrorInstance(globalThis),
-            .typeerror => this.msg.toTypeErrorInstance(globalThis),
-            .rangeerror => this.msg.toRangeErrorInstance(globalThis),
-        };
-        err.put(globalThis, ZigString.static("code"), ZigString.init(@tagName(this.code)).toValue(globalThis));
-        return err;
+    pub fn toJS(this: *DeferredError, globalThis: *JSGlobalObject) JSValue {
+        defer {
+            this.msg = bun.String.empty;
+        }
+
+        return Bun__createErrorInstanceWithKind(globalThis, this.kind, &bun.String.init(@tagName(this.code)), &this.msg);
     }
 };
