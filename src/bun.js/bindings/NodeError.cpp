@@ -55,3 +55,4 @@ extern "C" JSC::EncodedJSValue Bun__createErrorInstanceWithKind(
 
     return JSC::JSValue::encode(error);
 }
+}
