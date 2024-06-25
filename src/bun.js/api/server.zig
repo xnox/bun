@@ -408,8 +408,9 @@ pub const ServerConfig = struct {
 
         pub const zero = SSLConfig{};
 
-        pub fn inJS(global: *JSC.JSGlobalObject, obj: JSC.JSValue, exception: JSC.C.ExceptionRef) ?SSLConfig {
+        pub fn inJS(vm: *JSC.VirtualMachine, global: *JSC.JSGlobalObject, obj: JSC.JSValue, exception: JSC.C.ExceptionRef) ?SSLConfig {
             var result = zero;
+
             var arena: bun.ArenaAllocator = bun.ArenaAllocator.init(bun.default_allocator);
             defer arena.deinit();
 
@@ -420,13 +421,15 @@ pub const ServerConfig = struct {
 
             var any = false;
 
+            result.reject_unauthorized = @intFromBool(vm.getTLSRejectUnauthorized());
+
             // Required
             if (obj.getTruthy(global, "keyFile")) |key_file_name| {
                 var sliced = key_file_name.toSlice(global, bun.default_allocator);
                 defer sliced.deinit();
                 if (sliced.len > 0) {
                     result.key_file_name = bun.default_allocator.dupeZ(u8, sliced.slice()) catch unreachable;
-                    if (std.os.system.access(result.key_file_name, std.os.F_OK) != 0) {
+                    if (std.posix.system.access(result.key_file_name, std.posix.F_OK) != 0) {
                         JSC.throwInvalidArguments("Unable to access keyFile path", .{}, global, exception);
                         result.deinit();
 
@@ -525,7 +528,7 @@ pub const ServerConfig = struct {
                 defer sliced.deinit();
                 if (sliced.len > 0) {
                     result.cert_file_name = bun.default_allocator.dupeZ(u8, sliced.slice()) catch unreachable;
-                    if (std.os.system.access(result.cert_file_name, std.os.F_OK) != 0) {
+                    if (std.posix.system.access(result.cert_file_name, std.posix.F_OK) != 0) {
                         JSC.throwInvalidArguments("Unable to access certFile path", .{}, global, exception);
                         result.deinit();
                         return null;
@@ -766,7 +769,7 @@ pub const ServerConfig = struct {
                 defer sliced.deinit();
                 if (sliced.len > 0) {
                     result.ca_file_name = bun.default_allocator.dupeZ(u8, sliced.slice()) catch unreachable;
-                    if (std.os.system.access(result.ca_file_name, std.os.F_OK) != 0) {
+                    if (std.posix.system.access(result.ca_file_name, std.posix.F_OK) != 0) {
                         JSC.throwInvalidArguments("Invalid caFile path", .{}, global, exception);
                         result.deinit();
                         return null;
@@ -798,7 +801,7 @@ pub const ServerConfig = struct {
                     defer sliced.deinit();
                     if (sliced.len > 0) {
                         result.dh_params_file_name = bun.default_allocator.dupeZ(u8, sliced.slice()) catch unreachable;
-                        if (std.os.system.access(result.dh_params_file_name, std.os.F_OK) != 0) {
+                        if (std.posix.system.access(result.dh_params_file_name, std.posix.F_OK) != 0) {
                             JSC.throwInvalidArguments("Invalid dhParamsFile path", .{}, global, exception);
                             result.deinit();
                             return null;
@@ -834,6 +837,7 @@ pub const ServerConfig = struct {
 
     pub fn fromJS(global: *JSC.JSGlobalObject, arguments: *JSC.Node.ArgumentsSlice, exception: JSC.C.ExceptionRef) ServerConfig {
         var env = arguments.vm.bundler.env;
+        const vm = JSC.VirtualMachine.get();
 
         var args = ServerConfig{
             .address = .{
@@ -997,7 +1001,7 @@ pub const ServerConfig = struct {
                 }
             }
 
-            if (arg.getTruthy(global, "error")) |onError| {
+            if (arg.getTruthyComptime(global, "error")) |onError| {
                 if (!onError.isCallable(global.vm())) {
                     JSC.throwInvalidArguments("Expected error to be a function", .{}, global, exception);
                     if (args.ssl_config) |*conf| {
@@ -1034,7 +1038,7 @@ pub const ServerConfig = struct {
                         return args;
                     }
                     while (value_iter.next()) |item| {
-                        if (SSLConfig.inJS(global, item, exception)) |ssl_config| {
+                        if (SSLConfig.inJS(vm, global, item, exception)) |ssl_config| {
                             if (args.ssl_config == null) {
                                 args.ssl_config = ssl_config;
                             } else {
@@ -1061,7 +1065,7 @@ pub const ServerConfig = struct {
                         }
                     }
                 } else {
-                    if (SSLConfig.inJS(global, tls, exception)) |ssl_config| {
+                    if (SSLConfig.inJS(vm, global, tls, exception)) |ssl_config| {
                         args.ssl_config = ssl_config;
                     }
 
@@ -1078,7 +1082,7 @@ pub const ServerConfig = struct {
             // @compatibility Bun v0.x - v0.2.1
             // this used to be top-level, now it's "tls" object
             if (args.ssl_config == null) {
-                if (SSLConfig.inJS(global, arg, exception)) |ssl_config| {
+                if (SSLConfig.inJS(vm, global, arg, exception)) |ssl_config| {
                     args.ssl_config = ssl_config;
                 }
 
@@ -2076,7 +2080,7 @@ fn NewRequestContext(comptime ssl_enabled: bool, comptime debug_mode: bool, comp
             this.finalize();
         }
         const separator: string = "\r\n";
-        const separator_iovec = [1]std.os.iovec_const{.{
+        const separator_iovec = [1]std.posix.iovec_const{.{
             .iov_base = separator.ptr,
             .iov_len = separator.len,
         }};
@@ -2098,7 +2102,7 @@ fn NewRequestContext(comptime ssl_enabled: bool, comptime debug_mode: bool, comp
                 const val = linux.sendfile(this.sendfile.socket_fd.cast(), this.sendfile.fd.cast(), &signed_offset, this.sendfile.remain);
                 this.sendfile.offset = @as(Blob.SizeType, @intCast(signed_offset));
 
-                const errcode = linux.getErrno(val);
+                const errcode = bun.C.getErrno(val);
 
                 this.sendfile.remain -|= @as(Blob.SizeType, @intCast(this.sendfile.offset -| start));
 
@@ -2111,9 +2115,9 @@ fn NewRequestContext(comptime ssl_enabled: bool, comptime debug_mode: bool, comp
                     return errcode != .SUCCESS;
                 }
             } else {
-                var sbytes: std.os.off_t = adjusted_count;
+                var sbytes: std.posix.off_t = adjusted_count;
                 const signed_offset = @as(i64, @bitCast(@as(u64, this.sendfile.offset)));
-                const errcode = std.c.getErrno(std.c.sendfile(
+                const errcode = bun.C.getErrno(std.c.sendfile(
                     this.sendfile.fd.cast(),
                     this.sendfile.socket_fd.cast(),
                     signed_offset,
@@ -2210,7 +2214,7 @@ fn NewRequestContext(comptime ssl_enabled: bool, comptime debug_mode: bool, comp
             const auto_close = file.pathlike != .fd;
             const fd = if (!auto_close)
                 file.pathlike.fd
-            else switch (bun.sys.open(file.pathlike.path.sliceZ(&file_buf), std.os.O.RDONLY | std.os.O.NONBLOCK | std.os.O.CLOEXEC, 0)) {
+            else switch (bun.sys.open(file.pathlike.path.sliceZ(&file_buf), bun.O.RDONLY | bun.O.NONBLOCK | bun.O.CLOEXEC, 0)) {
                 .result => |_fd| _fd,
                 .err => |err| return this.runErrorHandler(err.withPath(file.pathlike.path.slice()).toSystemError().toErrorInstance(
                     this.server.globalThis,
@@ -2238,7 +2242,7 @@ fn NewRequestContext(comptime ssl_enabled: bool, comptime debug_mode: bool, comp
                     }
 
                     var err = bun.sys.Error{
-                        .errno = @as(bun.sys.Error.Int, @intCast(@intFromEnum(std.os.E.INVAL))),
+                        .errno = @as(bun.sys.Error.Int, @intCast(@intFromEnum(std.posix.E.INVAL))),
                         .syscall = .sendfile,
                     };
                     var sys = err.withPathLike(file.pathlike).toSystemError();
@@ -2251,13 +2255,13 @@ fn NewRequestContext(comptime ssl_enabled: bool, comptime debug_mode: bool, comp
             }
 
             if (Environment.isLinux) {
-                if (!(bun.isRegularFile(stat.mode) or std.os.S.ISFIFO(stat.mode) or std.os.S.ISSOCK(stat.mode))) {
+                if (!(bun.isRegularFile(stat.mode) or std.posix.S.ISFIFO(stat.mode) or std.posix.S.ISSOCK(stat.mode))) {
                     if (auto_close) {
                         _ = bun.sys.close(fd);
                     }
 
                     var err = bun.sys.Error{
-                        .errno = @as(bun.sys.Error.Int, @intCast(@intFromEnum(std.os.E.INVAL))),
+                        .errno = @as(bun.sys.Error.Int, @intCast(@intFromEnum(std.posix.E.INVAL))),
                         .syscall = .sendfile,
                     };
                     var sys = err.withPathLike(file.pathlike).toSystemError();
@@ -3511,7 +3515,7 @@ fn NewRequestContext(comptime ssl_enabled: bool, comptime debug_mode: bool, comp
                         loop.enter();
                         defer loop.exit();
 
-                        old.resolve(&body.value, this.server.globalThis);
+                        old.resolve(&body.value, this.server.globalThis, null);
                     }
                     return;
                 }
@@ -3563,7 +3567,7 @@ fn NewRequestContext(comptime ssl_enabled: bool, comptime debug_mode: bool, comp
                     var old = body.value;
                     old.Locked.onReceiveValue = null;
                     var new_body = .{ .Null = {} };
-                    old.resolve(&new_body, this.server.globalThis);
+                    old.resolve(&new_body, this.server.globalThis, null);
                     body.value = new_body;
                 }
             } else {
@@ -3663,7 +3667,7 @@ pub const WebSocketServer = struct {
 
             var valid = false;
 
-            if (object.getTruthy(globalObject, "message")) |message_| {
+            if (object.getTruthyComptime(globalObject, "message")) |message_| {
                 if (!message_.isCallable(vm)) {
                     globalObject.throwInvalidArguments("websocket expects a function for the message option", .{});
                     return null;
@@ -5784,6 +5788,7 @@ pub fn NewServer(comptime NamespaceType: type, comptime ssl_enabled_: bool, comp
 
                         if (listener.socket().localAddressText(&buf, &is_ipv6)) |slice| {
                             var ip = bun.String.createUTF8(slice);
+                            defer ip.deref();
                             return JSSocketAddress__create(
                                 this.globalThis,
                                 ip.toJS(this.globalThis),
@@ -5830,6 +5835,7 @@ pub fn NewServer(comptime NamespaceType: type, comptime ssl_enabled_: bool, comp
             defer default_allocator.free(buf);
 
             var value = bun.String.createUTF8(buf);
+            defer value.deref();
             return value.toJSDOMURL(globalThis);
         }
 

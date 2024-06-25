@@ -33,7 +33,7 @@ pub const BrotliEncoder = struct {
     poll_ref: bun.Async.KeepAlive = .{},
 
     pub fn hasPendingActivity(this: *BrotliEncoder) callconv(.C) bool {
-        return this.has_pending_activity.load(.Monotonic) > 0;
+        return this.has_pending_activity.load(.monotonic) > 0;
     }
 
     pub fn constructor(globalThis: *JSC.JSGlobalObject, _: *JSC.CallFrame) callconv(.C) ?*BrotliEncoder {
@@ -124,13 +124,13 @@ pub const BrotliEncoder = struct {
     pub fn runFromJSThread(this: *BrotliEncoder) void {
         this.poll_ref.unref(this.globalThis.bunVM());
 
-        defer _ = this.has_pending_activity.fetchSub(1, .Monotonic);
+        defer _ = this.has_pending_activity.fetchSub(1, .monotonic);
         this.drainFreelist();
 
         const result = this.callback_value.get().?.call(
             this.globalThis,
-            if (this.write_failure != null)
-                &.{this.write_failure.?.toError(this.globalThis)}
+            if (this.write_failure) |*err|
+                &.{err.toJS(this.globalThis)}
             else
                 &.{ .null, this.collectOutputValue() },
         );
@@ -152,19 +152,19 @@ pub const BrotliEncoder = struct {
         pub usingnamespace bun.New(@This());
 
         pub fn runTask(this: *JSC.WorkPoolTask) void {
-            var job: *EncodeJob = @fieldParentPtr(EncodeJob, "task", this);
+            var job: *EncodeJob = @fieldParentPtr("task", this);
             job.run();
             job.destroy();
         }
 
         pub fn run(this: *EncodeJob) void {
             defer {
-                _ = this.encoder.has_pending_activity.fetchSub(1, .Monotonic);
+                _ = this.encoder.has_pending_activity.fetchSub(1, .monotonic);
             }
 
             var any = false;
 
-            if (this.encoder.pending_encode_job_count.fetchAdd(1, .Monotonic) >= 0) {
+            if (this.encoder.pending_encode_job_count.fetchAdd(1, .monotonic) >= 0) {
                 const is_last = this.encoder.has_called_end;
                 while (true) {
                     this.encoder.input_lock.lock();
@@ -193,20 +193,20 @@ pub const BrotliEncoder = struct {
                     for (pending) |input| {
                         var writer = this.encoder.stream.writer(Writer{ .encoder = this.encoder });
                         writer.writeAll(input.slice()) catch {
-                            _ = this.encoder.pending_encode_job_count.fetchSub(1, .Monotonic);
-                            this.encoder.write_failure = JSC.DeferredError.from(.plainerror, .ERR_OPERATION_FAILED, "BrotliError", .{}); // TODO propogate better error
+                            _ = this.encoder.pending_encode_job_count.fetchSub(1, .monotonic);
+                            this.encoder.write_failure = JSC.DeferredError.from(.Error, .ERR_OPERATION_FAILED, "BrotliError", .{}); // TODO propogate better error
                             return;
                         };
                         if (this.encoder.output.items.len > this.encoder.maxOutputLength) {
-                            _ = this.encoder.pending_encode_job_count.fetchSub(1, .Monotonic);
-                            this.encoder.write_failure = JSC.DeferredError.from(.rangeerror, .ERR_BUFFER_TOO_LARGE, "Cannot create a Buffer larger than {d} bytes", .{this.encoder.maxOutputLength});
+                            _ = this.encoder.pending_encode_job_count.fetchSub(1, .monotonic);
+                            this.encoder.write_failure = JSC.DeferredError.from(.RangeError, .ERR_BUFFER_TOO_LARGE, "Cannot create a Buffer larger than {d} bytes", .{this.encoder.maxOutputLength});
                             return;
                         }
                     }
 
                     any = any or pending.len > 0;
 
-                    if (this.encoder.pending_encode_job_count.fetchSub(1, .Monotonic) == 0)
+                    if (this.encoder.pending_encode_job_count.fetchSub(1, .monotonic) == 0)
                         break;
                 }
 
@@ -216,17 +216,17 @@ pub const BrotliEncoder = struct {
                     defer this.encoder.output_lock.unlock();
 
                     output.appendSlice(bun.default_allocator, this.encoder.stream.end() catch {
-                        _ = this.encoder.pending_encode_job_count.fetchSub(1, .Monotonic);
-                        this.encoder.write_failure = JSC.DeferredError.from(.plainerror, .ERR_OPERATION_FAILED, "BrotliError", .{}); // TODO propogate better error
+                        _ = this.encoder.pending_encode_job_count.fetchSub(1, .monotonic);
+                        this.encoder.write_failure = JSC.DeferredError.from(.Error, .ERR_OPERATION_FAILED, "BrotliError", .{}); // TODO propogate better error
                         return;
                     }) catch {
-                        _ = this.encoder.pending_encode_job_count.fetchSub(1, .Monotonic);
-                        this.encoder.write_failure = JSC.DeferredError.from(.plainerror, .ERR_OPERATION_FAILED, "BrotliError", .{}); // TODO propogate better error
+                        _ = this.encoder.pending_encode_job_count.fetchSub(1, .monotonic);
+                        this.encoder.write_failure = JSC.DeferredError.from(.Error, .ERR_OPERATION_FAILED, "BrotliError", .{}); // TODO propogate better error
                         return;
                     };
                     if (output.items.len > this.encoder.maxOutputLength) {
-                        _ = this.encoder.pending_encode_job_count.fetchSub(1, .Monotonic);
-                        this.encoder.write_failure = JSC.DeferredError.from(.rangeerror, .ERR_BUFFER_TOO_LARGE, "Cannot create a Buffer larger than {d} bytes", .{this.encoder.maxOutputLength});
+                        _ = this.encoder.pending_encode_job_count.fetchSub(1, .monotonic);
+                        this.encoder.write_failure = JSC.DeferredError.from(.RangeError, .ERR_BUFFER_TOO_LARGE, "Cannot create a Buffer larger than {d} bytes", .{this.encoder.maxOutputLength});
                         return;
                     }
                 }
@@ -234,7 +234,7 @@ pub const BrotliEncoder = struct {
 
             if (this.is_async and any) {
                 var vm = this.encoder.globalThis.bunVMConcurrently();
-                _ = this.encoder.has_pending_activity.fetchAdd(1, .Monotonic);
+                _ = this.encoder.has_pending_activity.fetchAdd(1, .monotonic);
                 this.encoder.poll_ref.refConcurrently(vm);
                 vm.enqueueTaskConcurrent(JSC.ConcurrentTask.create(JSC.Task.init(this.encoder)));
             }
@@ -263,7 +263,7 @@ pub const BrotliEncoder = struct {
             return .zero;
         };
 
-        _ = this.has_pending_activity.fetchAdd(1, .Monotonic);
+        _ = this.has_pending_activity.fetchAdd(1, .monotonic);
         if (is_last)
             this.has_called_end = true;
 
@@ -305,7 +305,7 @@ pub const BrotliEncoder = struct {
             return .zero;
         };
 
-        _ = this.has_pending_activity.fetchAdd(1, .Monotonic);
+        _ = this.has_pending_activity.fetchAdd(1, .monotonic);
         if (is_last)
             this.has_called_end = true;
 
@@ -324,8 +324,8 @@ pub const BrotliEncoder = struct {
         if (!is_last and this.output.items.len == 0) {
             return .undefined;
         }
-        if (this.write_failure != null) {
-            globalThis.vm().throwError(globalThis, this.write_failure.?.toError(globalThis));
+        if (this.write_failure) |*err| {
+            globalThis.vm().throwError(globalThis, err.toJS(globalThis));
             return .zero;
         }
         return this.collectOutputValue();
@@ -370,7 +370,7 @@ pub const BrotliDecoder = struct {
     freelist_write_lock: bun.Lock = bun.Lock.init(),
 
     pub fn hasPendingActivity(this: *BrotliDecoder) callconv(.C) bool {
-        return this.has_pending_activity.load(.Monotonic) > 0;
+        return this.has_pending_activity.load(.monotonic) > 0;
     }
 
     pub fn deinit(this: *BrotliDecoder) void {
@@ -446,13 +446,13 @@ pub const BrotliDecoder = struct {
     pub fn runFromJSThread(this: *BrotliDecoder) void {
         this.poll_ref.unref(this.globalThis.bunVM());
 
-        defer _ = this.has_pending_activity.fetchSub(1, .Monotonic);
+        defer _ = this.has_pending_activity.fetchSub(1, .monotonic);
         this.drainFreelist();
 
         const result = this.callback_value.get().?.call(
             this.globalThis,
-            if (this.write_failure != null)
-                &.{this.write_failure.?.toError(this.globalThis)}
+            if (this.write_failure) |*err|
+                &.{err.toJS(this.globalThis)}
             else
                 &.{ .null, this.collectOutputValue() },
         );
@@ -494,7 +494,7 @@ pub const BrotliDecoder = struct {
             return .zero;
         };
 
-        _ = this.has_pending_activity.fetchAdd(1, .Monotonic);
+        _ = this.has_pending_activity.fetchAdd(1, .monotonic);
         if (is_last)
             this.has_called_end = true;
 
@@ -536,7 +536,7 @@ pub const BrotliDecoder = struct {
             return .zero;
         };
 
-        _ = this.has_pending_activity.fetchAdd(1, .Monotonic);
+        _ = this.has_pending_activity.fetchAdd(1, .monotonic);
         if (is_last)
             this.has_called_end = true;
 
@@ -555,8 +555,8 @@ pub const BrotliDecoder = struct {
         if (!is_last) {
             return .undefined;
         }
-        if (this.write_failure != null) {
-            globalThis.vm().throwError(globalThis, this.write_failure.?.toError(globalThis));
+        if (this.write_failure) |*err| {
+            globalThis.throwValue(err.toJS(globalThis));
             return .zero;
         }
         return this.collectOutputValue();
@@ -574,19 +574,19 @@ pub const BrotliDecoder = struct {
         pub usingnamespace bun.New(@This());
 
         pub fn runTask(this: *JSC.WorkPoolTask) void {
-            var job: *DecodeJob = @fieldParentPtr(DecodeJob, "task", this);
+            var job: *DecodeJob = @fieldParentPtr("task", this);
             job.run();
             job.destroy();
         }
 
         pub fn run(this: *DecodeJob) void {
             defer {
-                _ = this.decoder.has_pending_activity.fetchSub(1, .Monotonic);
+                _ = this.decoder.has_pending_activity.fetchSub(1, .monotonic);
             }
 
             var any = false;
 
-            if (this.decoder.pending_decode_job_count.fetchAdd(1, .Monotonic) >= 0) {
+            if (this.decoder.pending_decode_job_count.fetchAdd(1, .monotonic) >= 0) {
                 const is_last = this.decoder.has_called_end;
                 while (true) {
                     this.decoder.input_lock.lock();
@@ -617,28 +617,28 @@ pub const BrotliDecoder = struct {
                         this.decoder.stream.input = input;
                         this.decoder.stream.readAll(false) catch {
                             any = true;
-                            _ = this.decoder.pending_decode_job_count.fetchSub(1, .Monotonic);
-                            this.decoder.write_failure = JSC.DeferredError.from(.plainerror, .ERR_OPERATION_FAILED, "BrotliError", .{}); // TODO propogate better error
-                            break;
+                            _ = this.decoder.pending_decode_job_count.fetchSub(1, .monotonic);
+                            this.decoder.write_failure = JSC.DeferredError.from(.Error, .ERR_OPERATION_FAILED, "BrotliError", .{}); // TODO propogate better error
+                            return;
                         };
                         if (this.decoder.output.items.len > this.decoder.maxOutputLength) {
                             any = true;
-                            _ = this.decoder.pending_decode_job_count.fetchSub(1, .Monotonic);
-                            this.decoder.write_failure = JSC.DeferredError.from(.rangeerror, .ERR_BUFFER_TOO_LARGE, "Cannot create a Buffer larger than {d} bytes", .{this.decoder.maxOutputLength});
-                            break;
+                            _ = this.decoder.pending_decode_job_count.fetchSub(1, .monotonic);
+                            this.decoder.write_failure = JSC.DeferredError.from(.RangeError, .ERR_BUFFER_TOO_LARGE, "Cannot create a Buffer larger than {d} bytes", .{this.decoder.maxOutputLength});
+                            return;
                         }
                     }
 
                     any = any or pending.len > 0;
 
-                    if (this.decoder.pending_decode_job_count.fetchSub(1, .Monotonic) == 0)
+                    if (this.decoder.pending_decode_job_count.fetchSub(1, .monotonic) == 0)
                         break;
                 }
             }
 
             if (this.is_async and any) {
                 var vm = this.decoder.globalThis.bunVMConcurrently();
-                _ = this.decoder.has_pending_activity.fetchAdd(1, .Monotonic);
+                _ = this.decoder.has_pending_activity.fetchAdd(1, .monotonic);
                 this.decoder.poll_ref.refConcurrently(vm);
                 vm.enqueueTaskConcurrent(JSC.ConcurrentTask.create(JSC.Task.init(this.decoder)));
             }

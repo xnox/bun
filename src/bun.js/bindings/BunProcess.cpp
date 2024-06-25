@@ -3,11 +3,13 @@
 #include <JavaScriptCore/JSMicrotask.h>
 #include <JavaScriptCore/ObjectConstructor.h>
 #include <JavaScriptCore/NumberPrototype.h>
+#include "CommonJSModuleRecord.h"
 #include "JavaScriptCore/CatchScope.h"
 #include "JavaScriptCore/JSCJSValue.h"
 #include "JavaScriptCore/JSCast.h"
 #include "JavaScriptCore/JSString.h"
 #include "JavaScriptCore/Protect.h"
+#include "JavaScriptCore/PutPropertySlot.h"
 #include "ScriptExecutionContext.h"
 #include "headers-handwritten.h"
 #include "node_api.h"
@@ -75,7 +77,6 @@ namespace Bun {
 
 using namespace JSC;
 
-#define REPORTED_NODE_VERSION "22.2.0"
 #define processObjectBindingCodeGenerator processObjectInternalsBindingCodeGenerator
 #define setProcessObjectInternalsMainModuleCodeGenerator processObjectInternalsSetMainModuleCodeGenerator
 #define setProcessObjectMainModuleCodeGenerator setMainModuleCodeGenerator
@@ -145,7 +146,7 @@ static JSValue constructVersions(VM& vm, JSObject* processObject)
     JSC::JSObject* object = JSC::constructEmptyObject(globalObject, globalObject->objectPrototype(), 23);
 
     object->putDirect(vm, JSC::Identifier::fromString(vm, "node"_s),
-        JSC::JSValue(JSC::jsOwnedString(vm, makeAtomString(REPORTED_NODE_VERSION))));
+        JSC::JSValue(JSC::jsOwnedString(vm, makeAtomString(REPORTED_NODEJS_VERSION))));
     object->putDirect(
         vm, JSC::Identifier::fromString(vm, "bun"_s),
         JSC::JSValue(JSC::jsOwnedString(vm, makeAtomString(Bun__version + 1 /* remove "v" prefix */))));
@@ -285,9 +286,13 @@ JSC_DEFINE_HOST_FUNCTION(Process_functionDlopen,
     }
 
     globalObject->pendingNapiModule = exports;
+    Strong<JSC::Unknown> strongExports;
+
     if (exports.isCell()) {
-        vm.writeBarrier(globalObject, exports.asCell());
+        strongExports = { vm, exports.asCell() };
     }
+
+    Strong<JSC::JSObject> strongModule = { vm, moduleObject };
 
     WTF::String filename = callFrame->uncheckedArgument(1).toWTFString(globalObject);
     if (filename.isEmpty()) {
@@ -344,17 +349,20 @@ JSC_DEFINE_HOST_FUNCTION(Process_functionDlopen,
     }
 
     if (callCountAtStart != globalObject->napiModuleRegisterCallCount) {
-        JSValue pendingModule = globalObject->pendingNapiModule;
+        JSValue resultValue = globalObject->pendingNapiModule;
         globalObject->pendingNapiModule = JSValue {};
         globalObject->napiModuleRegisterCallCount = 0;
 
-        if (pendingModule) {
-            if (pendingModule.isCell() && pendingModule.getObject()->isErrorInstance()) {
-                JSC::throwException(globalObject, scope, pendingModule);
+        RETURN_IF_EXCEPTION(scope, {});
+
+        if (resultValue && resultValue != strongModule.get()) {
+            if (resultValue.isCell() && resultValue.getObject()->isErrorInstance()) {
+                JSC::throwException(globalObject, scope, resultValue);
                 return JSC::JSValue::encode(JSC::JSValue {});
             }
-            return JSC::JSValue::encode(pendingModule);
         }
+
+        return JSValue::encode(jsUndefined());
     }
 
     JSC::EncodedJSValue (*napi_register_module_v1)(JSC::JSGlobalObject* globalObject,
@@ -381,7 +389,19 @@ JSC_DEFINE_HOST_FUNCTION(Process_functionDlopen,
         return JSC::JSValue::encode(JSC::JSValue {});
     }
 
-    return napi_register_module_v1(globalObject, JSC::JSValue::encode(exports));
+    EncodedJSValue exportsValue = JSC::JSValue::encode(exports);
+    JSC::JSValue resultValue = JSValue::decode(napi_register_module_v1(globalObject, exportsValue));
+
+    RETURN_IF_EXCEPTION(scope, {});
+
+    // https://github.com/nodejs/node/blob/2eff28fb7a93d3f672f80b582f664a7c701569fb/src/node_api.cc#L734-L742
+    // https://github.com/oven-sh/bun/issues/1288
+    if (!resultValue.isEmpty() && !scope.exception() && (!strongExports || resultValue != strongExports.get())) {
+        PutPropertySlot slot(strongModule.get(), false);
+        strongModule->put(strongModule.get(), globalObject, builtinNames(vm).exportsPublicName(), resultValue, slot);
+    }
+
+    return JSValue::encode(resultValue);
 }
 
 JSC_DEFINE_HOST_FUNCTION(Process_functionUmask,
@@ -1492,7 +1512,7 @@ static JSValue constructReportObjectComplete(VM& vm, Zig::GlobalObject* globalOb
         }
 
         header->putDirect(vm, JSC::Identifier::fromString(vm, "commandLine"_s), JSValue::decode(Bun__Process__getExecArgv(globalObject)), 0);
-        header->putDirect(vm, JSC::Identifier::fromString(vm, "nodejsVersion"_s), JSC::jsString(vm, String::fromLatin1(REPORTED_NODE_VERSION)), 0);
+        header->putDirect(vm, JSC::Identifier::fromString(vm, "nodejsVersion"_s), JSC::jsString(vm, String::fromLatin1(REPORTED_NODEJS_VERSION)), 0);
         header->putDirect(vm, JSC::Identifier::fromString(vm, "wordSize"_s), JSC::jsNumber(64), 0);
         header->putDirect(vm, JSC::Identifier::fromString(vm, "arch"_s), constructArch(vm, header), 0);
         header->putDirect(vm, JSC::Identifier::fromString(vm, "platform"_s), constructPlatform(vm, header), 0);
@@ -1929,7 +1949,7 @@ static JSValue constructBrowser(VM& vm, JSObject* processObject)
 
 static JSValue constructVersion(VM& vm, JSObject* processObject)
 {
-    return JSC::jsString(vm, makeString("v", REPORTED_NODE_VERSION));
+    return JSC::jsString(vm, makeString("v", REPORTED_NODEJS_VERSION));
 }
 
 static JSValue constructIsBun(VM& vm, JSObject* processObject)

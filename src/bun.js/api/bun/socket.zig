@@ -224,7 +224,7 @@ const Handlers = struct {
         this.active_connections -= 1;
         if (this.active_connections == 0) {
             if (this.is_server) {
-                var listen_socket: *Listener = @fieldParentPtr(Listener, "handlers", this);
+                var listen_socket: *Listener = @fieldParentPtr("handlers", this);
                 // allow it to be GC'd once the last connection is closed and it's not listening anymore
                 if (listen_socket.listener == null) {
                     listen_socket.strong_self.clear();
@@ -364,6 +364,7 @@ pub const SocketConfig = struct {
     exclusive: bool = false,
 
     pub fn fromJS(
+        vm: *JSC.VirtualMachine,
         opts: JSC.JSValue,
         globalObject: *JSC.JSGlobalObject,
         exception: JSC.C.ExceptionRef,
@@ -381,7 +382,7 @@ pub const SocketConfig = struct {
                     ssl = JSC.API.ServerConfig.SSLConfig.zero;
                 }
             } else {
-                if (JSC.API.ServerConfig.SSLConfig.inJS(globalObject, tls, exception)) |ssl_config| {
+                if (JSC.API.ServerConfig.SSLConfig.inJS(vm, globalObject, tls, exception)) |ssl_config| {
                     ssl = ssl_config;
                 } else if (exception.* != null) {
                     return null;
@@ -616,7 +617,9 @@ pub const Listener = struct {
             return .zero;
         }
 
-        var socket_config = SocketConfig.fromJS(opts, globalObject, exception) orelse {
+        const vm = JSC.VirtualMachine.get();
+
+        var socket_config = SocketConfig.fromJS(vm, opts, globalObject, exception) orelse {
             return .zero;
         };
 
@@ -635,7 +638,7 @@ pub const Listener = struct {
         const ctx_opts: uws.us_bun_socket_context_options_t = JSC.API.ServerConfig.SSLConfig.asUSockets(ssl);
 
         defer if (ssl != null) ssl.?.deinit();
-        globalObject.bunVM().eventLoop().ensureWaker();
+        vm.eventLoop().ensureWaker();
 
         const socket_context = uws.us_create_bun_socket_context(
             @intFromBool(ssl_enabled),
@@ -649,7 +652,7 @@ pub const Listener = struct {
                 hostname_or_unix.deinit();
             }
 
-            const errno = @intFromEnum(std.c.getErrno(-1));
+            const errno = @intFromEnum(bun.C.getErrno(@as(c_int, -1)));
             if (errno != 0) {
                 err.put(globalObject, ZigString.static("errno"), JSValue.jsNumber(errno));
                 if (bun.C.SystemErrno.init(errno)) |str| {
@@ -749,7 +752,7 @@ pub const Listener = struct {
                     bun.span(hostname_or_unix.slice()),
                 },
             );
-            const errno = @intFromEnum(std.c.getErrno(-1));
+            const errno = @intFromEnum(bun.C.getErrno(@as(c_int, -1)));
             if (errno != 0) {
                 err.put(globalObject, ZigString.static("errno"), JSValue.jsNumber(errno));
                 if (bun.C.SystemErrno.init(errno)) |str| {
@@ -858,7 +861,7 @@ pub const Listener = struct {
         var exception_ref = [_]JSC.C.JSValueRef{null};
         const exception: JSC.C.ExceptionRef = &exception_ref;
 
-        if (JSC.API.ServerConfig.SSLConfig.inJS(global, tls, exception)) |ssl_config| {
+        if (JSC.API.ServerConfig.SSLConfig.inJS(JSC.VirtualMachine.get(), global, tls, exception)) |ssl_config| {
             // to keep nodejs compatibility, we allow to replace the server name
             uws.us_socket_context_remove_server_name(1, this.socket_context, server_name);
             uws.us_bun_socket_context_add_server_name(1, this.socket_context, server_name, ssl_config.asUSockets(), null);
@@ -994,8 +997,9 @@ pub const Listener = struct {
             exception.* = JSC.toInvalidArguments("Expected options object", .{}, globalObject).asObjectRef();
             return .zero;
         }
+        const vm = globalObject.bunVM();
 
-        const socket_config = SocketConfig.fromJS(opts, globalObject, exception) orelse {
+        const socket_config = SocketConfig.fromJS(vm, opts, globalObject, exception) orelse {
             return .zero;
         };
 
@@ -1012,7 +1016,7 @@ pub const Listener = struct {
 
         const ctx_opts: uws.us_bun_socket_context_options_t = JSC.API.ServerConfig.SSLConfig.asUSockets(socket_config.ssl);
 
-        globalObject.bunVM().eventLoop().ensureWaker();
+        vm.eventLoop().ensureWaker();
 
         const socket_context = uws.us_create_bun_socket_context(@intFromBool(ssl_enabled), uws.Loop.get(), @sizeOf(usize), ctx_opts) orelse {
             const err = JSC.SystemError{
@@ -1213,9 +1217,9 @@ fn NewSocket(comptime ssl: bool) type {
             JSC.Codegen.JSTLSSocket;
 
         pub fn hasPendingActivity(this: *This) callconv(.C) bool {
-            @fence(.Acquire);
+            @fence(.acquire);
 
-            return this.has_pending_activity.load(.Acquire);
+            return this.has_pending_activity.load(.acquire);
         }
 
         pub fn doConnect(this: *This, connection: Listener.UnixOrHost, socket_ctx: *uws.SocketContext) !void {
@@ -1365,7 +1369,7 @@ fn NewSocket(comptime ssl: bool) type {
                 var promise = val.asPromise().?;
                 const err_ = err.toErrorInstance(globalObject);
                 promise.rejectOnNextTickAsHandled(globalObject, err_);
-                this.has_pending_activity.store(false, .Release);
+                this.has_pending_activity.store(false, .release);
             }
         }
         pub fn onConnectError(this: *This, _: Socket, errno: c_int) void {
@@ -1377,7 +1381,7 @@ fn NewSocket(comptime ssl: bool) type {
             if (!this.is_active) {
                 this.handlers.markActive();
                 this.is_active = true;
-                this.has_pending_activity.store(true, .Release);
+                this.has_pending_activity.store(true, .release);
             }
         }
 
@@ -1398,7 +1402,7 @@ fn NewSocket(comptime ssl: bool) type {
                 const vm = this.handlers.vm;
                 this.handlers.markInactive(ssl, this.socket.context(), this.wrapped);
                 this.poll_ref.unref(vm);
-                this.has_pending_activity.store(false, .Release);
+                this.has_pending_activity.store(false, .release);
             }
         }
 
@@ -1703,7 +1707,8 @@ fn NewSocket(comptime ssl: bool) type {
                 return JSValue.jsUndefined();
             }
 
-            return @fieldParentPtr(Listener, "handlers", this.handlers).strong_self.get() orelse JSValue.jsUndefined();
+            const l: *Listener = @fieldParentPtr("handlers", this.handlers);
+            return l.strong_self.get() orelse JSValue.jsUndefined();
         }
 
         pub fn getReadyState(
@@ -2994,7 +2999,7 @@ fn NewSocket(comptime ssl: bool) type {
                         ssl_opts = JSC.API.ServerConfig.SSLConfig.zero;
                     }
                 } else {
-                    if (JSC.API.ServerConfig.SSLConfig.inJS(globalObject, tls, &exception)) |ssl_config| {
+                    if (JSC.API.ServerConfig.SSLConfig.inJS(JSC.VirtualMachine.get(), globalObject, tls, &exception)) |ssl_config| {
                         ssl_opts = ssl_config;
                     } else if (exception != null) {
                         return .zero;
@@ -3120,7 +3125,7 @@ fn NewSocket(comptime ssl: bool) type {
                 // the connection can be upgraded inside a handler call so we need to garantee that it will be still alive
                 this.handlers.markInactive(ssl, old_context, this.wrapped);
                 this.poll_ref.unref(vm);
-                this.has_pending_activity.store(false, .Release);
+                this.has_pending_activity.store(false, .release);
             }
 
             const array = JSC.JSValue.createEmptyArray(globalObject, 2);

@@ -112,6 +112,9 @@ pub const Loader = struct {
         }
     }
 
+    /// Checks whether `NODE_TLS_REJECT_UNAUTHORIZED` is set to `0` or `false`.
+    ///
+    /// **Prefer VirtualMachine.getTLSRejectUnauthorized()** for JavaScript, as individual workers could have different settings.
     pub fn getTLSRejectUnauthorized(this: *Loader) bool {
         if (this.reject_unauthorized) |reject_unauthorized| {
             return reject_unauthorized;
@@ -1267,7 +1270,11 @@ pub const Map = struct {
     }
 
     pub fn remove(this: *Map, key: string) void {
-        this.map.remove(key);
+        _ = this.map.swapRemove(key);
+    }
+
+    pub fn cloneWithAllocator(this: *const Map, new_allocator: std.mem.Allocator) !Map {
+        return .{ .map = try this.map.cloneWithAllocator(new_allocator) };
     }
 };
 

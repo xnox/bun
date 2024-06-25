@@ -87,7 +87,7 @@ pub const Response = struct {
         var content_type_slice: ZigString.Slice = this.getContentType() orelse return null;
         defer content_type_slice.deinit();
         const encoding = bun.FormData.Encoding.get(content_type_slice.slice()) orelse return null;
-        return bun.FormData.AsyncFormData.init(bun.default_allocator, encoding) catch unreachable;
+        return bun.FormData.AsyncFormData.init(bun.default_allocator, encoding) catch bun.outOfMemory();
     }
 
     pub fn estimatedSize(this: *Response) callconv(.C) usize {
@@ -146,38 +146,38 @@ pub const Response = struct {
             try formatter.writeIndent(Writer, writer);
             try writer.writeAll(comptime Output.prettyFmt("<r>ok<d>:<r> ", enable_ansi_colors));
             formatter.printAs(.Boolean, Writer, writer, JSC.JSValue.jsBoolean(this.isOK()), .BooleanObject, enable_ansi_colors);
-            formatter.printComma(Writer, writer, enable_ansi_colors) catch unreachable;
+            formatter.printComma(Writer, writer, enable_ansi_colors) catch bun.outOfMemory();
             try writer.writeAll("\n");
 
             try formatter.writeIndent(Writer, writer);
             try writer.writeAll(comptime Output.prettyFmt("<r>url<d>:<r> \"", enable_ansi_colors));
             try writer.print(comptime Output.prettyFmt("<r><b>{}<r>", enable_ansi_colors), .{this.url});
             try writer.writeAll("\"");
-            formatter.printComma(Writer, writer, enable_ansi_colors) catch unreachable;
+            formatter.printComma(Writer, writer, enable_ansi_colors) catch bun.outOfMemory();
             try writer.writeAll("\n");
 
             try formatter.writeIndent(Writer, writer);
             try writer.writeAll(comptime Output.prettyFmt("<r>status<d>:<r> ", enable_ansi_colors));
             formatter.printAs(.Double, Writer, writer, JSC.JSValue.jsNumber(this.init.status_code), .NumberObject, enable_ansi_colors);
-            formatter.printComma(Writer, writer, enable_ansi_colors) catch unreachable;
+            formatter.printComma(Writer, writer, enable_ansi_colors) catch bun.outOfMemory();
             try writer.writeAll("\n");
 
             try formatter.writeIndent(Writer, writer);
             try writer.writeAll(comptime Output.prettyFmt("<r>statusText<d>:<r> ", enable_ansi_colors));
             try writer.print(comptime Output.prettyFmt("<r>\"<b>{}<r>\"", enable_ansi_colors), .{this.init.status_text});
-            formatter.printComma(Writer, writer, enable_ansi_colors) catch unreachable;
+            formatter.printComma(Writer, writer, enable_ansi_colors) catch bun.outOfMemory();
             try writer.writeAll("\n");
 
             try formatter.writeIndent(Writer, writer);
             try writer.writeAll(comptime Output.prettyFmt("<r>headers<d>:<r> ", enable_ansi_colors));
             formatter.printAs(.Private, Writer, writer, this.getHeaders(formatter.globalThis), .DOMWrapper, enable_ansi_colors);
-            formatter.printComma(Writer, writer, enable_ansi_colors) catch unreachable;
+            formatter.printComma(Writer, writer, enable_ansi_colors) catch bun.outOfMemory();
             try writer.writeAll("\n");
 
             try formatter.writeIndent(Writer, writer);
             try writer.writeAll(comptime Output.prettyFmt("<r>redirected<d>:<r> ", enable_ansi_colors));
             formatter.printAs(.Boolean, Writer, writer, JSC.JSValue.jsBoolean(this.redirected), .BooleanObject, enable_ansi_colors);
-            formatter.printComma(Writer, writer, enable_ansi_colors) catch unreachable;
+            formatter.printComma(Writer, writer, enable_ansi_colors) catch bun.outOfMemory();
             try writer.writeAll("\n");
 
             formatter.resetLine();
@@ -773,12 +773,12 @@ pub const Fetch = struct {
         ref_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
 
         pub fn ref(this: *FetchTasklet) void {
-            const count = this.ref_count.fetchAdd(1, .Monotonic);
+            const count = this.ref_count.fetchAdd(1, .monotonic);
             bun.debugAssert(count > 0);
         }
 
         pub fn deref(this: *FetchTasklet) void {
-            const count = this.ref_count.fetchSub(1, .Monotonic);
+            const count = this.ref_count.fetchSub(1, .monotonic);
             bun.debugAssert(count > 0);
 
             if (count == 1) {
@@ -881,7 +881,7 @@ pub const Fetch = struct {
         fn deinit(this: *FetchTasklet) void {
             log("deinit", .{});
 
-            bun.assert(this.ref_count.load(.Monotonic) == 0);
+            bun.assert(this.ref_count.load(.monotonic) == 0);
 
             this.clearData();
 
@@ -1048,7 +1048,7 @@ pub const Fetch = struct {
                         };
 
                         if (old == .Locked) {
-                            old.resolve(&response.body.value, this.global_this);
+                            old.resolve(&response.body.value, this.global_this, response.getFetchHeaders());
                         }
                     }
                 }
@@ -1060,7 +1060,7 @@ pub const Fetch = struct {
             log("onProgressUpdate", .{});
             defer this.deref();
             this.mutex.lock();
-            this.has_schedule_callback.store(false, .Monotonic);
+            this.has_schedule_callback.store(false, .monotonic);
 
             if (this.is_waiting_body) {
                 this.onBodyReceived();
@@ -1187,7 +1187,7 @@ pub const Fetch = struct {
                     prom.reject(globalObject, res);
                 }
             };
-            var holder = bun.default_allocator.create(Holder) catch unreachable;
+            var holder = bun.default_allocator.create(Holder) catch bun.outOfMemory();
             holder.* = .{
                 .held = JSC.Strong.create(result, globalThis),
                 // we need the promise to be alive until the task is done
@@ -1215,6 +1215,7 @@ pub const Fetch = struct {
                         const globalObject = this.global_this;
                         const js_cert = X509.toJS(x509, globalObject);
                         var hostname: bun.String = bun.String.createUTF8(certificate_info.hostname);
+                        defer hostname.deref();
                         const js_hostname = hostname.toJS(globalObject);
                         js_hostname.ensureStillAlive();
                         js_cert.ensureStillAlive();
@@ -1227,7 +1228,7 @@ pub const Fetch = struct {
                             check_result.ensureStillAlive();
                             check_result.protect();
                             this.abort_reason = check_result;
-                            this.signal_store.aborted.store(true, .Monotonic);
+                            this.signal_store.aborted.store(true, .monotonic);
                             this.tracker.didCancel(this.global_this);
 
                             // we need to abort the request
@@ -1386,7 +1387,7 @@ pub const Fetch = struct {
             if (this.http) |http_| {
                 http_.enableBodyStreaming();
             }
-            if (this.signal_store.aborted.load(.Monotonic)) {
+            if (this.signal_store.aborted.load(.monotonic)) {
                 return JSC.WebCore.DrainResult{
                     .aborted = {},
                 };
@@ -1608,7 +1609,7 @@ pub const Fetch = struct {
             }
 
             if (fetch_tasklet.check_server_identity.has() and fetch_tasklet.reject_unauthorized) {
-                fetch_tasklet.signal_store.cert_errors.store(true, .Monotonic);
+                fetch_tasklet.signal_store.cert_errors.store(true, .monotonic);
             } else {
                 fetch_tasklet.signals.cert_errors = null;
             }
@@ -1648,7 +1649,7 @@ pub const Fetch = struct {
             }
 
             // we want to return after headers are received
-            fetch_tasklet.signal_store.header_progress.store(true, .Monotonic);
+            fetch_tasklet.signal_store.header_progress.store(true, .monotonic);
 
             if (fetch_tasklet.request_body == .Sendfile) {
                 bun.assert(fetch_options.url.isHTTP());
@@ -1667,7 +1668,7 @@ pub const Fetch = struct {
             reason.ensureStillAlive();
             this.abort_reason = reason;
             reason.protect();
-            this.signal_store.aborted.store(true, .Monotonic);
+            this.signal_store.aborted.store(true, .monotonic);
             this.tracker.didCancel(this.global_this);
 
             if (this.http != null) {
@@ -1685,7 +1686,7 @@ pub const Fetch = struct {
             disable_decompression: bool,
             reject_unauthorized: bool,
             url: ZigURL,
-            verbose: bool = false,
+            verbose: http.HTTPVerboseLevel = .none,
             redirect_type: FetchRedirect = FetchRedirect.follow,
             proxy: ?ZigURL = null,
             url_proxy_buffer: []const u8 = "",
@@ -1785,7 +1786,7 @@ pub const Fetch = struct {
                 task.response_buffer.reset();
             }
 
-            if (task.has_schedule_callback.cmpxchgStrong(false, true, .Acquire, .Monotonic)) |has_schedule_callback| {
+            if (task.has_schedule_callback.cmpxchgStrong(false, true, .acquire, .monotonic)) |has_schedule_callback| {
                 if (has_schedule_callback) {
                     task.deref();
                     return;
@@ -1843,6 +1844,7 @@ pub const Fetch = struct {
         const globalThis = ctx.ptr();
         const arguments = callframe.arguments(2);
         bun.Analytics.Features.fetch += 1;
+        const vm = JSC.VirtualMachine.get();
 
         var exception_val = [_]JSC.C.JSValueRef{null};
         const exception: JSC.C.ExceptionRef = &exception_val;
@@ -1868,9 +1870,8 @@ pub const Fetch = struct {
 
         var headers: ?Headers = null;
         var method = Method.GET;
-        var script_ctx = globalThis.bunVM();
 
-        var args = JSC.Node.ArgumentsSlice.init(script_ctx, arguments.slice());
+        var args = JSC.Node.ArgumentsSlice.init(vm, arguments.slice());
 
         var url = ZigURL{};
         var first_arg = args.nextEat().?;
@@ -1888,7 +1889,11 @@ pub const Fetch = struct {
         var disable_timeout = false;
         var disable_keepalive = false;
         var disable_decompression = false;
-        var verbose = script_ctx.log.level.atLeast(.debug);
+        var verbose: http.HTTPVerboseLevel = if (vm.log.level.atLeast(.debug)) .headers else .none;
+        if (verbose == .none) {
+            verbose = vm.getVerboseFetch();
+        }
+
         var proxy: ?ZigURL = null;
         var redirect_type: FetchRedirect = FetchRedirect.follow;
         var signal: ?*JSC.WebCore.AbortSignal = null;
@@ -1905,7 +1910,7 @@ pub const Fetch = struct {
         var url_type = URLType.remote;
 
         var ssl_config: ?*SSLConfig = null;
-        var reject_unauthorized = script_ctx.bundler.env.getTLSRejectUnauthorized();
+        var reject_unauthorized = vm.getTLSRejectUnauthorized();
         var check_server_identity: JSValue = .zero;
 
         defer {
@@ -1919,7 +1924,7 @@ pub const Fetch = struct {
         if (first_arg.as(Request)) |request| {
             const can_use_fast_getters = first_arg.asDirect(Request) == request;
             const slow_getters: ?JSC.JSValue = if (can_use_fast_getters) null else first_arg;
-            request.ensureURL() catch unreachable;
+            request.ensureURL() catch bun.outOfMemory();
 
             var url_str = request.url;
             var need_to_deinit_url_str = false;
@@ -2016,30 +2021,30 @@ pub const Fetch = struct {
                                     if (hostname) |host| {
                                         allocator.free(host);
                                     }
-                                    hostname = _hostname.toOwnedSliceZ(allocator) catch unreachable;
+                                    hostname = _hostname.toOwnedSliceZ(allocator) catch bun.outOfMemory();
                                 }
-                                headers = Headers.from(headers__, allocator, .{ .body = &body }) catch unreachable;
+                                headers = Headers.from(headers__, allocator, .{ .body = &body }) catch bun.outOfMemory();
                                 // TODO: make this one pass
                             } else if (FetchHeaders.createFromJS(ctx.ptr(), headers_)) |headers__| {
                                 if (headers__.fastGet(JSC.FetchHeaders.HTTPHeaderName.Host)) |_hostname| {
                                     if (hostname) |host| {
                                         allocator.free(host);
                                     }
-                                    hostname = _hostname.toOwnedSliceZ(allocator) catch unreachable;
+                                    hostname = _hostname.toOwnedSliceZ(allocator) catch bun.outOfMemory();
                                 }
-                                headers = Headers.from(headers__, allocator, .{ .body = &body }) catch unreachable;
+                                headers = Headers.from(headers__, allocator, .{ .body = &body }) catch bun.outOfMemory();
                                 headers__.deref();
                             } else if (request.getFetchHeaders()) |head| {
                                 if (head.fastGet(JSC.FetchHeaders.HTTPHeaderName.Host)) |_hostname| {
                                     if (hostname) |host| {
                                         allocator.free(host);
                                     }
-                                    hostname = _hostname.toOwnedSliceZ(allocator) catch unreachable;
+                                    hostname = _hostname.toOwnedSliceZ(allocator) catch bun.outOfMemory();
                                 }
-                                headers = Headers.from(head, allocator, .{ .body = &body }) catch unreachable;
+                                headers = Headers.from(head, allocator, .{ .body = &body }) catch bun.outOfMemory();
                             }
                         } else if (request.getFetchHeaders()) |head| {
-                            headers = Headers.from(head, allocator, .{ .body = &body }) catch unreachable;
+                            headers = Headers.from(head, allocator, .{ .body = &body }) catch bun.outOfMemory();
                         }
 
                         if (options.get(ctx, "timeout")) |timeout_value| {
@@ -2064,8 +2069,17 @@ pub const Fetch = struct {
                             }
                         }
 
-                        if (options.get(globalThis, "verbose")) |verb| {
-                            verbose = verb.toBoolean();
+                        if (options.get(globalThis, "verbose")) |verb| verbose: {
+                            if (verb.isString()) {
+                                if (verb.getZigString(globalThis).eqlComptime("curl")) {
+                                    verbose = .curl;
+                                    break :verbose;
+                                }
+                            }
+
+                            if (verb.isBoolean()) {
+                                verbose = if (verb.toBoolean()) .headers else .none;
+                            }
                         }
 
                         if (options.get(globalThis, "signal")) |signal_arg| {
@@ -2085,7 +2099,7 @@ pub const Fetch = struct {
 
                         if (options.get(ctx, "tls")) |tls| {
                             if (!tls.isEmptyOrUndefinedOrNull() and tls.isObject()) {
-                                if (SSLConfig.inJS(globalThis, tls, exception)) |config| {
+                                if (SSLConfig.inJS(vm, globalThis, tls, exception)) |config| {
                                     if (ssl_config) |existing_conf| {
                                         existing_conf.deinit();
                                         bun.default_allocator.destroy(existing_conf);
@@ -2212,9 +2226,9 @@ pub const Fetch = struct {
                             if (hostname) |host| {
                                 allocator.free(host);
                             }
-                            hostname = _hostname.toOwnedSliceZ(allocator) catch unreachable;
+                            hostname = _hostname.toOwnedSliceZ(allocator) catch bun.outOfMemory();
                         }
-                        headers = Headers.from(head, allocator, .{ .body = &body }) catch unreachable;
+                        headers = Headers.from(head, allocator, .{ .body = &body }) catch bun.outOfMemory();
                     }
 
                     // Creating headers can throw.
@@ -2318,9 +2332,9 @@ pub const Fetch = struct {
                                     if (hostname) |host| {
                                         allocator.free(host);
                                     }
-                                    hostname = _hostname.toOwnedSliceZ(allocator) catch unreachable;
+                                    hostname = _hostname.toOwnedSliceZ(allocator) catch bun.outOfMemory();
                                 }
-                                headers = Headers.from(headers__, allocator, .{ .body = &body }) catch unreachable;
+                                headers = Headers.from(headers__, allocator, .{ .body = &body }) catch bun.outOfMemory();
                                 // TODO: make this one pass
                             } else if (FetchHeaders.createFromJS(ctx.ptr(), headers_)) |headers__| {
                                 defer headers__.deref();
@@ -2328,9 +2342,9 @@ pub const Fetch = struct {
                                     if (hostname) |host| {
                                         allocator.free(host);
                                     }
-                                    hostname = _hostname.toOwnedSliceZ(allocator) catch unreachable;
+                                    hostname = _hostname.toOwnedSliceZ(allocator) catch bun.outOfMemory();
                                 }
-                                headers = Headers.from(headers__, allocator, .{ .body = &body }) catch unreachable;
+                                headers = Headers.from(headers__, allocator, .{ .body = &body }) catch bun.outOfMemory();
                             } else {
                                 // Converting the headers failed; return null and
                                 //  let the set exception get thrown
@@ -2360,8 +2374,17 @@ pub const Fetch = struct {
                             }
                         }
 
-                        if (options.get(globalThis, "verbose")) |verb| {
-                            verbose = verb.toBoolean();
+                        if (options.get(globalThis, "verbose")) |verb| verbose: {
+                            if (verb.isString()) {
+                                if (verb.getZigString(globalThis).eqlComptime("curl")) {
+                                    verbose = .curl;
+                                    break :verbose;
+                                }
+                            }
+
+                            if (verb.isBoolean()) {
+                                verbose = if (verb.toBoolean()) .headers else .none;
+                            }
                         }
 
                         if (options.get(globalThis, "signal")) |signal_arg| {
@@ -2381,7 +2404,7 @@ pub const Fetch = struct {
 
                         if (options.get(ctx, "tls")) |tls| {
                             if (!tls.isEmptyOrUndefinedOrNull() and tls.isObject()) {
-                                if (SSLConfig.inJS(globalThis, tls, exception)) |config| {
+                                if (SSLConfig.inJS(vm, globalThis, tls, exception)) |config| {
                                     ssl_config = bun.default_allocator.create(SSLConfig) catch bun.outOfMemory();
                                     ssl_config.?.* = config;
                                 }
@@ -2519,7 +2542,7 @@ pub const Fetch = struct {
                     }
 
                     var cwd_buf: bun.PathBuffer = undefined;
-                    const cwd = if (Environment.isWindows) (std.os.getcwd(&cwd_buf) catch |err| {
+                    const cwd = if (Environment.isWindows) (bun.getcwd(&cwd_buf) catch |err| {
                         globalThis.throwError(err, "Failed to resolve file url");
                         return .zero;
                     }) else globalThis.bunVM().bundler.fs.top_level_dir;
@@ -2594,7 +2617,7 @@ pub const Fetch = struct {
                 null,
                 allocator,
                 .{ .body = &body },
-            ) catch unreachable;
+            ) catch bun.outOfMemory();
         }
 
         var http_body = FetchTasklet.HTTPRequestBody{
@@ -2605,7 +2628,7 @@ pub const Fetch = struct {
             prepare_body: {
                 const opened_fd_res: JSC.Maybe(bun.FileDescriptor) = switch (body.Blob.store.?.data.file.pathlike) {
                     .fd => |fd| bun.sys.dup(fd),
-                    .path => |path| bun.sys.open(path.sliceZ(&globalThis.bunVM().nodeFS().sync_error_buf), if (Environment.isWindows) std.os.O.RDONLY else std.os.O.RDONLY | std.os.O.NOCTTY, 0),
+                    .path => |path| bun.sys.open(path.sliceZ(&globalThis.bunVM().nodeFS().sync_error_buf), if (Environment.isWindows) bun.O.RDONLY else bun.O.RDONLY | bun.O.NOCTTY, 0),
                 };
 
                 const opened_fd = switch (opened_fd_res) {
@@ -2789,9 +2812,9 @@ pub const Headers = struct {
             }
             break :brk false;
         };
-        headers.entries.ensureTotalCapacity(allocator, header_count) catch unreachable;
+        headers.entries.ensureTotalCapacity(allocator, header_count) catch bun.outOfMemory();
         headers.entries.len = header_count;
-        headers.buf.ensureTotalCapacityPrecise(allocator, buf_len) catch unreachable;
+        headers.buf.ensureTotalCapacityPrecise(allocator, buf_len) catch bun.outOfMemory();
         headers.buf.items.len = buf_len;
         var sliced = headers.entries.slice();
         var names = sliced.items(.name);
