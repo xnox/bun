@@ -11,7 +11,7 @@ const createBrotliDecoder = $zig("node_zlib_binding.zig", "createBrotliDecoder")
 const createDeflateEncoder = $zig("node_zlib_binding.zig", "createDeflateEncoder");
 const createDeflateDecoder = $zig("node_zlib_binding.zig", "createDeflateDecoder");
 
-const maxOutputLengthDefault = $requireMap.$get("buffer")?.exports.kMaxLength ?? BufferModule.kMaxLength;
+const maxOutputLengthDefault = $requireMap.$get("buffer")?.exports?.kMaxLength ?? BufferModule.kMaxLength;
 
 function brotliCompress(buffer, opts, callback) {
   if (typeof opts === "function") {
