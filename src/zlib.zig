@@ -644,7 +644,7 @@ pub extern fn deflate(strm: z_streamp, flush: FlushValue) ReturnCode;
 ///   deallocated).
 pub extern fn deflateEnd(stream: z_streamp) ReturnCode;
 
-pub extern fn deflateReset(stream: z_streamp) c_int;
+pub extern fn deflateReset(stream: z_streamp) ReturnCode;
 
 //   deflateBound() returns an upper bound on the compressed size after
 //  deflation of sourceLen bytes.  It must be called after deflateInit() or
@@ -915,6 +915,12 @@ pub const ZlibCompressorStreaming = struct {
     flush: FlushValue = .NoFlush,
     finishFlush: FlushValue = .Finish,
 
+    pub fn reset(this: *ZlibCompressorStreaming) !void {
+        const ret_code = deflateReset(&this.state);
+        if (ret_code != .Ok) return error.ZlibError;
+        return;
+    }
+
     pub fn init(this: *ZlibCompressorStreaming, level: u8, windowBits: c_int, memLevel: c_int, strategy: c_int) !void {
         const ret_code = deflateInit2_(&this.state, level, 8, windowBits, memLevel, strategy, zlibVersion(), @sizeOf(z_stream));
         if (ret_code != .Ok) return error.ZlibError;
@@ -997,6 +1003,12 @@ pub const ZlibDecompressorStreaming = struct {
 
     pub fn writer(this: *ZlibDecompressorStreaming, out_writer: anytype) WriterImpl(@TypeOf(out_writer)).Writer {
         return (WriterImpl(@TypeOf(out_writer)){ .ctx = this, .out_writer = out_writer }).writer();
+    }
+
+    pub fn reset(this: *ZlibDecompressorStreaming) !void {
+        const ret_code = inflateReset(&this.state);
+        if (ret_code != .Ok) return error.ZlibError;
+        return;
     }
 
     fn WriterImpl(comptime T: type) type {

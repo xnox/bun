@@ -12,12 +12,12 @@ export default [
     JSType: "0b11101110",
     values: ["callback"],
     proto: {
-      encode: {
-        fn: "encode",
+      write: {
+        fn: "write",
         length: 2,
       },
-      encodeSync: {
-        fn: "encodeSync",
+      writeSync: {
+        fn: "writeSync",
         length: 2,
       },
       reset: {
@@ -41,12 +41,12 @@ export default [
     values: ["callback"],
 
     proto: {
-      decode: {
-        fn: "decode",
+      write: {
+        fn: "write",
         length: 2,
       },
-      decodeSync: {
-        fn: "decodeSync",
+      writeSync: {
+        fn: "writeSync",
         length: 2,
       },
       reset: {
@@ -70,12 +70,12 @@ export default [
     JSType: "0b11101110",
     values: ["callback"],
     proto: {
-      encode: {
-        fn: "encode",
+      write: {
+        fn: "write",
         length: 2,
       },
-      encodeSync: {
-        fn: "encodeSync",
+      writeSync: {
+        fn: "writeSync",
         length: 2,
       },
       reset: {
@@ -99,12 +99,12 @@ export default [
     values: ["callback"],
 
     proto: {
-      decode: {
-        fn: "decode",
+      write: {
+        fn: "write",
         length: 2,
       },
-      decodeSync: {
-        fn: "decodeSync",
+      writeSync: {
+        fn: "writeSync",
         length: 2,
       },
       reset: {
