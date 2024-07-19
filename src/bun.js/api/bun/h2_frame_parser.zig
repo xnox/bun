@@ -540,7 +540,9 @@ const Handlers = struct {
 var CORK_BUFFER: [16386]u8 = undefined;
 var CORK_OFFSET: u16 = 0;
 var CORKED_H2: ?*H2FrameParser = null;
+const H2FrameParserHiveAllocator = bun.HiveArray(H2FrameParser, 256).Fallback;
 
+var h2frameparser_allocator = H2FrameParserHiveAllocator.init(bun.default_allocator);
 
 pub const H2FrameParser = struct {
     pub const log = Output.scoped(.H2FrameParser, false);
@@ -2620,7 +2622,7 @@ pub const H2FrameParser = struct {
         };
 
         const allocator = getAllocator(globalObject);
-        var this = allocator.create(H2FrameParser) catch bun.outOfMemory();
+        var this = h2frameparser_allocator.tryGet() catch bun.outOfMemory();
 
         this.* = H2FrameParser{
             .handlers = handlers,
@@ -2662,12 +2664,11 @@ pub const H2FrameParser = struct {
     }
 
     pub fn deinit(this: *H2FrameParser) void {
-        var allocator = this.allocator;
-        defer allocator.destroy(this);
+        defer h2frameparser_allocator.put(this);
         this.strong_ctx.deinit();
         this.handlers.deinit();
         this.readBuffer.deinit();
-        this.writeBuffer.deinitWithAllocator(allocator);
+        this.writeBuffer.deinitWithAllocator(this.allocator);
 
         if (this.hpack) |hpack| {
             hpack.deinit();
