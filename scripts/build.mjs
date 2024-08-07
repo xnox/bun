@@ -1186,13 +1186,14 @@ function getBrotliArtifacts(options) {
  */
 async function buildBrotli(options) {
   await cmakeGenerateBuild(
-    options,
+    { ...options, pic: true },
+    "-DBROTLI_BUNDLED_MODE=ON",
     "-DBUILD_SHARED_LIBS=OFF",
     "-DBROTLI_BUILD_TOOLS=OFF",
     "-DBROTLI_DISABLE_TESTS=ON",
     "-DBROTLI_EMSCRIPTEN=OFF",
   );
-  await cmakeBuild(options, "brotlicommon", "brotlidec", "brotlienc");
+  await cmakeBuild(options);
 }
 
 /**
