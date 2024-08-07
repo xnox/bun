@@ -1577,7 +1577,10 @@ if(USE_STATIC_SQLITE)
     message(STATUS "Using static sqlite3")
     target_compile_definitions(${bun} PRIVATE "LAZY_LOAD_SQLITE=0")
 
+    # See: src/bun.js/bindings/sqlite/CMakeLists.txt
+    # This is a custom target that produces a static sqlite3 library called libsqlite3.a
     include_directories(${BUN_SRC}/bun.js/bindings/sqlite)
+
     if(WIN32)
         target_link_libraries(${bun} PRIVATE "${BUN_DEPS_OUT_DIR}/sqlite3.lib")
     else()

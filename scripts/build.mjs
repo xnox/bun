@@ -755,10 +755,11 @@ function getArtifacts(options) {
     });
   }
 
-  if (os === "darwin") {
+  if (os !== "darwin") {
     addDependency({
       name: "sqlite",
       artifacts: getSqliteArtifacts(options),
+      cwd: join(cwd, "src", "bun.js", "bindings", "sqlite"),
       build: buildSqlite,
     });
   }
@@ -1438,7 +1439,7 @@ function getSqliteArtifacts(options) {
 
 async function buildSqlite(options) {
   await cmakeGenerateBuild(options);
-  await cmakeBuild(options, ...getSqliteArtifacts(options));
+  await cmakeBuild(options);
 }
 
 /**
