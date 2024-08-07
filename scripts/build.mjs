@@ -755,14 +755,6 @@ function getArtifacts(options) {
     });
   }
 
-  if (os !== "darwin") {
-    addDependency({
-      name: "sqlite",
-      artifacts: getSqliteArtifacts(options),
-      build: buildSqlite,
-    });
-  }
-
   function addSubmodule(submodule) {
     addArtifact(submodule);
   }
