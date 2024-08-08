@@ -1381,7 +1381,7 @@ export function getOption(option) {
     }
   }
 
-  if (typeof value === "undefined") {
+  if (typeof value === "undefined" || value === null || Number.isNaN(value)) {
     return;
   } else if (typeof value !== "string") {
     value = `${value}`;
