@@ -166,7 +166,6 @@ export function getBuildOptions() {
   const customTarget = getOption({
     name: "target",
     description: "The target to build (e.g. darwin-aarch64, bun-windows-x64-baseline)",
-    parse: parseTarget,
     defaultValue: () => {
       if (ci) {
         return getBuildStep();
@@ -203,7 +202,7 @@ export function getBuildOptions() {
     defaultValue: customTarget?.includes("-baseline"),
   });
 
-  const target = baseline ? `${os}-${arch}-baseline` : `${os}-${arch}`;
+  const target = parseTarget(baseline ? `${os}-${arch}-baseline` : `${os}-${arch}`);
 
   if (!crossCompile && (machineOs !== os || machineArch !== arch)) {
     throw new Error(`Cross-compilation is not enabled, use --cross-compile if you want to compile: ${target}`);
@@ -881,7 +880,7 @@ async function linkBun(options) {
       ["zig", "cpp", "deps"].map(name =>
         buildkiteDownloadArtifact({
           // Defined in .buildkite/ci.yml
-          step: `${target}-build-${name}`,
+          step: `bun-${target}-build-${name}`,
           cwd: join(basePath, `bun-${name}`),
         }),
       ),
@@ -921,7 +920,7 @@ async function packageBun(options) {
   async function packageBunZip(label) {
     // e.g. "bun" -> "bun-darwin-x64"
     //      "bun-profile" -> "bun-darwin-x64-baseline-profile"
-    const name = label.replace("bun", target);
+    const name = label.replace("bun", `bun-${target}`);
     const packagePath = join(buildPath, name);
     mkdir(packagePath, { clean: true });
 
