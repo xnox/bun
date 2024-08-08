@@ -1231,7 +1231,7 @@ function getBrotliArtifacts(options) {
 async function buildBrotli(options) {
   const { lto, target } = options;
   await cmakeGenerateBuild(
-    { ...options, pic: true, lto: lto && target !== "bun-linux-x64" },
+    { ...options, pic: true, assertions: false, lto: lto && target !== "bun-linux-x64" },
     "-DBUILD_SHARED_LIBS=OFF",
     "-DBROTLI_BUILD_TOOLS=OFF",
     "-DBROTLI_DISABLE_TESTS=ON",
