@@ -932,12 +932,17 @@ async function packageBun(options) {
         throw new Error(`Invalid features.json: ${featuresJson}`, { cause });
       }
       writeFile(featuresPath, featuresJson);
+      copyFile(featuresPath, join(packagePath, "features.json"));
     }
 
     // For non-release Windows builds, copy the .pdb file for debug symbols.
     // This is also needed by the bun.report service to decode crash reports.
     if (os === "windows" && label !== "bun") {
-      copyFile(join(buildPath, "bun.pdb"), join(packagePath, "bun.pdb"));
+      copyFile(join(buildPath, "bun.pdb"), join(packagePath, `${label}.pdb`));
+    }
+
+    if (os === "darwin" && label === "bun-profile") {
+      copyFile(join(buildPath, "bun-profile.dSYM"), join(packagePath, `${label}.dSYM`));
     }
 
     // e.g. "bun-darwin-x64-profile.zip" that contains:
@@ -1194,8 +1199,9 @@ function getBrotliArtifacts(options) {
  * @param {BuildOptions} options
  */
 async function buildBrotli(options) {
+  const { lto, target } = options;
   await cmakeGenerateBuild(
-    { ...options, pic: true },
+    { ...options, pic: true, lto: lto && target !== "bun-linux-x64" },
     "-DBUILD_SHARED_LIBS=OFF",
     "-DBROTLI_BUILD_TOOLS=OFF",
     "-DBROTLI_DISABLE_TESTS=ON",
