@@ -49,6 +49,8 @@ import {
   buildkiteDownloadArtifact,
   mkdirTemp,
   getGitPullRequest,
+  parseTarget,
+  parseSemver,
 } from "./util.mjs";
 
 async function main() {
@@ -127,6 +129,7 @@ async function main() {
  * @property {string} [artifact]
  * @property {string} [cachePath]
  * @property {"read-write" | "read" | "write" | "none"} [cacheStrategy]
+ * @property {boolean} [ci]
  */
 
 /**
@@ -134,11 +137,38 @@ async function main() {
  * @returns {BuildOptions}
  */
 export function getBuildOptions() {
+  const cwd = getOption({
+    name: "cwd",
+    description: "The current working directory",
+    parse: resolve,
+    defaultValue: () => process.cwd(),
+  });
+
+  const ci = getOption({
+    name: "ci",
+    description: "If the build is running in CI, or if you want to mimic a CI build",
+    type: "boolean",
+    defaultValue: isCI,
+  });
+
+  const canary = getOption({
+    name: "canary",
+    description: "The canary revision, if the build is a canary build",
+    type: "number",
+    defaultValue: () => {
+      if (ci && isGitMainBranch()) {
+        return 0;
+      }
+      return 1;
+    },
+  });
+
   const customTarget = getOption({
     name: "target",
-    description: "The target to build (e.g. bun-darwin-aarch64, bun-windows-x64-baseline)",
+    description: "The target to build (e.g. darwin-aarch64, bun-windows-x64-baseline)",
+    parse: parseTarget,
     defaultValue: () => {
-      if (isCI) {
+      if (ci) {
         return getBuildStep();
       }
     },
@@ -173,7 +203,7 @@ export function getBuildOptions() {
     defaultValue: customTarget?.includes("-baseline"),
   });
 
-  const target = baseline ? `bun-${os}-${arch}-baseline` : `bun-${os}-${arch}`;
+  const target = baseline ? `${os}-${arch}-baseline` : `${os}-${arch}`;
 
   if (!crossCompile && (machineOs !== os || machineArch !== arch)) {
     throw new Error(`Cross-compilation is not enabled, use --cross-compile if you want to compile: ${target}`);
@@ -183,6 +213,13 @@ export function getBuildOptions() {
     name: "webkit",
     description: "If WebKit should be built locally, instead of using prebuilt binaries",
     type: "boolean",
+  });
+
+  const assertions = getOption({
+    name: "assertions",
+    description: "If debug assertions should be enabled",
+    type: "boolean",
+    defaultValue: canary,
   });
 
   const debug = getOption({
@@ -195,6 +232,7 @@ export function getBuildOptions() {
     name: "debug-symbols",
     description: "If debug symbols should be generated",
     type: "boolean",
+    defaultValue: canary,
   });
 
   const lto = getOption({
@@ -211,36 +249,36 @@ export function getBuildOptions() {
   });
 
   if (valgrind && os !== "linux") {
-    throw new Error(`Valgrind is not supported on target: ${os}-${arch}`);
+    throw new Error(`Valgrind is not supported on target: ${target}`);
   }
 
-  const assertions = getOption({
-    name: "assertions",
-    description: "If debug assertions should be enabled",
-    type: "boolean",
+  const version = getOption({
+    name: "version",
+    description: "The version of the build (e.g. 1.0.0)",
+    type: "string",
+    parse: string => parseSemver(string).join("."),
+    defaultValue: () => readFile(join(cwd, "LATEST")),
   });
 
-  const canary = getOption({
-    name: "canary",
-    description: "If the build is a canary build, the canary revision",
-    type: "number",
-    defaultValue: () => {
-      if (isCI && isGitMainBranch()) {
-        return 0;
-      }
-      return 1;
-    },
+  const revision = getOption({
+    name: "revision",
+    description: "The revision of the build (e.g. git SHA)",
+    type: "string",
+    defaultValue: () => getGitSha(cwd),
   });
 
   const buildId = getOption({
     name: "build-id",
     description: "The unique build ID (e.g. build number from CI)",
     type: "string",
-    defaultValue: () => {
-      if (isCI) {
-        return getBuildId();
-      }
-    },
+    defaultValue: getBuildId,
+  });
+
+  const pullRequest = getOption({
+    name: "pull-request",
+    description: "The pull request number, if a pull request.",
+    type: "number",
+    defaultValue: getGitPullRequest,
   });
 
   const clean = getOption({
@@ -253,7 +291,7 @@ export function getBuildOptions() {
     name: "min-macos-version",
     description: "The minimum version of macOS to target",
     defaultValue: () => {
-      if (isCI && os === "darwin") {
+      if (ci && os === "darwin") {
         return "13.0";
       }
     },
@@ -318,8 +356,7 @@ export function getBuildOptions() {
   const ccache = getCommand({
     name: "ccache",
     description: "The ccache to use",
-    aliases: ["sccache"],
-    throwIfNotFound: isCI,
+    throwIfNotFound: ci,
   });
 
   const jobs = getOption({
@@ -330,28 +367,12 @@ export function getBuildOptions() {
     defaultValue: getCpus,
   });
 
-  const cwd = getOption({
-    name: "cwd",
-    description: "The current working directory",
-    parse: resolve,
-    defaultValue: process.cwd(),
-  });
-
   const buildPath = getOption({
     name: "build-path",
     description: "The build directory",
     parse: resolve,
     defaultValue: () => {
-      let basePath = cwd;
-      // if (isBuildKite) {
-      //   const buildPath = process.env["BUILDKITE_BUILD_PATH"];
-      //   const repository = getGitUrl();
-      //   const branch = getGitBranch();
-      //   if (buildPath && repository && branch) {
-      //     basePath = join(buildPath, "git", sanitizePath(repository), sanitizePath(branch));
-      //   }
-      // }
-      return join(basePath, "build", debug ? "debug" : "release", target);
+      return join(cwd, "build", debug ? "debug" : "release", target);
     },
   });
 
@@ -360,7 +381,7 @@ export function getBuildOptions() {
     description: "The path to use for build caching",
     parse: resolve,
     defaultValue: () => {
-      if (isCI) {
+      if (ci) {
         const homePath = process.env["HOME"];
         if (homePath) {
           return join(homePath, ".cache", debug ? "debug" : "release", target);
@@ -394,14 +415,17 @@ export function getBuildOptions() {
     arch,
     baseline,
     target,
+    canary,
+    version,
+    revision,
+    buildId,
+    pullRequest,
     webkit,
     lto,
     debug,
     debugSymbols,
     valgrind,
     assertions,
-    canary,
-    buildId,
     osxVersion,
     llvmVersion,
     cc,
@@ -474,8 +498,8 @@ export async function build(options, ...args) {
     addArtifact("bun");
   }
 
-  const { clean, dump } = options;
-  if (isCI || dump) {
+  const { ci, clean, dump } = options;
+  if (ci || dump) {
     await runTask("{dim}Artifacts{reset}", () => console.log(artifacts.map(({ name }) => name)));
     if (sources.length) {
       await runTask("{dim}Sources{reset}", () => console.log(sources.map(({ name }) => name)));
@@ -889,7 +913,7 @@ async function buildBun(options) {
  * @param {BuildOptions} options
  */
 async function packageBun(options) {
-  const { cwd, buildPath, debug, os, target } = options;
+  const { cwd, buildPath, debug, os, target, ci } = options;
 
   /**
    * @param {"bun" | "bun-profile" | "bun-debug"} label
@@ -977,7 +1001,7 @@ async function packageBun(options) {
   }
 
   const labels = debug ? ["bun-debug"] : ["bun", "bun-profile"];
-  await Promise.all(labels.map(isCI ? packageBunZip : prepareBun));
+  await Promise.all(labels.map(ci ? packageBunZip : prepareBun));
 }
 
 /**
@@ -985,9 +1009,9 @@ async function packageBun(options) {
  * @returns {string[]}
  */
 function getBunArtifacts(options) {
-  const { os, debug, target } = options;
+  const { os, debug, target, ci } = options;
 
-  if (isCI) {
+  if (ci) {
     const names = debug ? ["bun-debug"] : ["bun", "bun-profile"];
     return names.map(name => `${name.replace("bun", target)}.zip`);
   }
@@ -1008,14 +1032,18 @@ function getBunArtifacts(options) {
  * @param {"cpp" | "zig" | "link" | undefined} target
  */
 async function cmakeGenerateBunBuild(options, target) {
-  const { buildPath, buildId, canary, baseline, lto, debug, assertions, valgrind } = options;
+  const { buildPath, canary, baseline, lto, debug, assertions, valgrind } = options;
+  const { version, revision, buildId, pullRequest } = options;
   const baseBuildPath = dirname(buildPath);
 
   const cpuTarget = getCpuTarget(options);
   const flags = [
     "-DNO_CONFIGURE_DEPENDS=ON",
     `-DCPU_TARGET=${cpuTarget}`,
+    version && `-DBUN_VERSION=${version}`,
+    revision && `-DGIT_SHA=${revision}`,
     buildId && `-DBUILD_ID=${buildId}`,
+    pullRequest && `-DPULL_REQUEST=${pullRequest}`,
     canary && `-DCANARY=${canary}`,
     baseline && "-DUSE_BASELINE_BUILD=ON",
     lto && "-DUSE_LTO=ON",
@@ -1023,13 +1051,6 @@ async function cmakeGenerateBunBuild(options, target) {
     debug && assertions && "-DUSE_DEBUG_JSC=ON",
     assertions && "-DENABLE_LOGS=true",
   ];
-
-  if (isCI) {
-    const pullRequest = getGitPullRequest();
-    if (pullRequest) {
-      flags.push(`-DPULL_REQUEST=${pullRequest}`);
-    }
-  }
 
   if (target === "cpp") {
     flags.push("-DBUN_CPP_ONLY=ON");

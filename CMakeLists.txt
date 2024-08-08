@@ -3,11 +3,15 @@ cmake_policy(SET CMP0091 NEW)
 cmake_policy(SET CMP0067 NEW)
 
 set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
-set(Bun_VERSION "1.1.22")
+
+if(NOT BUN_VERSION)
+    set(BUN_VERSION "0.0.0")
+endif()
+
 set(WEBKIT_TAG a060f087c2232fb20d82c321d21e074e735d3261)
 
 set(BUN_WORKDIR "${CMAKE_CURRENT_BINARY_DIR}")
-message(STATUS "Configuring Bun ${Bun_VERSION} in ${BUN_WORKDIR}")
+message(STATUS "Configuring Bun ${BUN_VERSION} in ${BUN_WORKDIR}")
 
 set(CMAKE_COLOR_DIAGNOSTICS ON)
 set(CMAKE_CXX_STANDARD 20)
@@ -244,7 +248,7 @@ else()
     )
 endif()
 
-project(Bun VERSION "${Bun_VERSION}")
+project(Bun VERSION "${BUN_VERSION}")
 
 # if(MSVC)
 # message(FATAL_ERROR "Bun does not support building with MSVC. Please use `cmake -G Ninja` with LLVM ${LLVM_VERSION} and Ninja.")
@@ -954,7 +958,8 @@ if(NOT BUN_LINK_ONLY AND NOT BUN_CPP_ONLY)
         "--verbose"
         "-Dgenerated-code=${BUN_WORKDIR}/codegen"
         "-freference-trace=10"
-        "-Dversion=${Bun_VERSION}"
+        "-Dversion=${BUN_VERSION}"
+        "-Dsha=${GIT_SHA}"
         "-Dcanary=${CANARY}"
         "-Doptimize=${ZIG_OPTIMIZE}"
         "-Dcpu=${CPU_TARGET}"
@@ -998,9 +1003,9 @@ endif()
 
 # -- Windows resources (app icon) --
 if(CANARY GREATER 0)
-    set(Bun_VERSION_WITH_TAG "${Bun_VERSION}-canary.${CANARY}")
+    set(BUN_VERSION_WITH_TAG "${BUN_VERSION}-canary.${CANARY}")
 else()
-    set(Bun_VERSION_WITH_TAG "${Bun_VERSION}")
+    set(BUN_VERSION_WITH_TAG "${BUN_VERSION}")
 endif()
 
 if(WIN32)

@@ -1433,7 +1433,7 @@ export function parseTarget(target) {
       throw new Error(`Windows is not supported on architecture: ${arch}`);
     }
 
-    return `bun-${os}-${arch}${suffix}`;
+    return `${os}-${arch}${suffix}`;
   } catch (cause) {
     throw new Error(`Invalid target: ${target}`, { cause });
   }
