@@ -183,13 +183,13 @@ export function getTmpdir() {
     const appData = process.env["LOCALAPPDATA"];
     if (appData) {
       const appDataTemp = join(appData, "Temp");
-      if (existsSync(appDataTemp)) {
+      if (exists(appDataTemp)) {
         return appDataTemp;
       }
     }
   }
 
-  if (isMacOS && existsSync("/tmp")) {
+  if (isMacOS && exists("/tmp")) {
     return "/tmp";
   }
 
