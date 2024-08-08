@@ -227,13 +227,6 @@ export function getBuildOptions() {
     type: "boolean",
   });
 
-  const debugSymbols = getOption({
-    name: "debug-symbols",
-    description: "If debug symbols should be generated",
-    type: "boolean",
-    defaultValue: canary,
-  });
-
   const lto = getOption({
     name: "lto",
     description: "If the target should be built with link-time optimization (LTO)",
@@ -423,7 +416,6 @@ export function getBuildOptions() {
     webkit,
     lto,
     debug,
-    debugSymbols,
     valgrind,
     assertions,
     osxVersion,
@@ -1395,7 +1387,7 @@ function getLshpackArtifacts(options) {
  */
 async function buildLshpack(options) {
   // FIXME: There is a linking issue with lshpack built in debug mode or debug symbols
-  await cmakeGenerateBuild({ ...options, debug: false, debugSymbols: false }, "-DLSHPACK_XXH=ON", "-DSHARED=0");
+  await cmakeGenerateBuild({ ...options, debug: false, assertions: false }, "-DLSHPACK_XXH=ON", "-DSHARED=0");
   await cmakeBuild(options, ...getLshpackArtifacts(options));
 }
 
@@ -1784,7 +1776,7 @@ function getCmakePath(path) {
  * @returns {string[]}
  */
 function getCmakeFlags(options) {
-  const { cwd, buildPath, debug, debugSymbols, os, osxVersion, clean } = options;
+  const { cwd, buildPath, debug, assertions, os, osxVersion, clean } = options;
   const { cc, cxx, ar, ranlib, ld, ccache } = options;
 
   const flags = [
@@ -1804,7 +1796,7 @@ function getCmakeFlags(options) {
 
   if (debug) {
     flags.push("-DCMAKE_BUILD_TYPE=Debug");
-  } else if (debugSymbols) {
+  } else if (assertions) {
     flags.push("-DCMAKE_BUILD_TYPE=RelWithDebInfo");
   } else {
     flags.push("-DCMAKE_BUILD_TYPE=Release");
