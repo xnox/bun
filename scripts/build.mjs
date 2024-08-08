@@ -1013,7 +1013,7 @@ function getBunArtifacts(options) {
 
   if (ci) {
     const names = debug ? ["bun-debug"] : ["bun", "bun-profile"];
-    return names.map(name => `${name.replace("bun", target)}.zip`);
+    return names.map(name => `${name.replace("bun", `bun-${target}`)}.zip`);
   }
 
   if (os === "windows") {
