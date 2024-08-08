@@ -218,7 +218,7 @@ export function getBuildOptions() {
     name: "assertions",
     description: "If debug assertions should be enabled",
     type: "boolean",
-    defaultValue: canary,
+    defaultValue: canary && !isGitMainBranch(),
   });
 
   const debug = getOption({
@@ -249,7 +249,11 @@ export function getBuildOptions() {
     description: "The version of the build (e.g. 1.0.0)",
     type: "string",
     parse: string => parseSemver(string).join("."),
-    defaultValue: () => readFile(join(cwd, "LATEST")),
+    defaultValue: () => {
+      const latest = readFile(join(cwd, "LATEST"));
+      const [major, minor, patch] = parseSemver(latest);
+      return `${major}.${minor}.${patch + 1}`;
+    },
   });
 
   const revision = getOption({
@@ -1223,7 +1227,7 @@ function getBrotliArtifacts(options) {
 async function buildBrotli(options) {
   const { lto, target } = options;
   await cmakeGenerateBuild(
-    { ...options, pic: true, assertions: false, lto: lto && target !== "bun-linux-x64" },
+    { ...options, pic: true, lto: lto && target !== "linux-x64" },
     "-DBUILD_SHARED_LIBS=OFF",
     "-DBROTLI_BUILD_TOOLS=OFF",
     "-DBROTLI_DISABLE_TESTS=ON",
