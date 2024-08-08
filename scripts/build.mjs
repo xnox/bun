@@ -414,6 +414,7 @@ export function getBuildOptions() {
     arch,
     baseline,
     target,
+    ci,
     canary,
     version,
     revision,
