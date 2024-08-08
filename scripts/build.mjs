@@ -1182,7 +1182,7 @@ async function buildBoringSsl(options) {
  * @param {BuildOptions} options
  * @returns {string[]}
  */
-function getBrotliOriginalArtifacts(options) {
+function getBrotliArtifacts(options) {
   const { os } = options;
   if (os === "windows") {
     return ["brotlicommon.lib", "brotlidec.lib", "brotlienc.lib"];
@@ -1190,39 +1190,18 @@ function getBrotliOriginalArtifacts(options) {
   return ["libbrotlicommon.a", "libbrotlidec.a", "libbrotlienc.a"];
 }
 
-function getBrotliArtifacts(options) {
-  const { os } = options;
-  if (os === "windows") {
-    return ["brotli.lib"];
-  }
-  return ["libbrotli.a"];
-}
-
 /**
  * @param {BuildOptions} options
  */
 async function buildBrotli(options) {
-  const { os, buildPath, ar, ranlib } = options;
   await cmakeGenerateBuild(
-    options,
+    { ...options, pic: true },
     "-DBUILD_SHARED_LIBS=OFF",
     "-DBROTLI_BUILD_TOOLS=OFF",
     "-DBROTLI_DISABLE_TESTS=ON",
     "-DBROTLI_EMSCRIPTEN=OFF",
   );
   await cmakeBuild(options, "brotlicommon", "brotlidec", "brotlienc");
-  const objectList = [];
-  for (const artifact of getBrotliOriginalArtifacts(options)) {
-    const artifactPath = join(buildPath, artifact.replace(".", "-"));
-    mkdir(artifactPath, { clean: true });
-    await spawn(ar, ["-x", join(buildPath, artifact)], { cwd: artifactPath });
-    objectList.push(...listFiles(artifactPath).map(filename => join(artifactPath, filename)));
-  }
-  const brotliPath = join(buildPath, os === "windows" ? "brotli.lib" : "libbrotli.a");
-  await spawn(ar, ["-r", brotliPath, ...objectList], { cwd: buildPath });
-  if (ranlib) {
-    await spawn(ranlib, [brotliPath], { cwd: buildPath });
-  }
 }
 
 /**
