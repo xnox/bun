@@ -962,12 +962,13 @@ export function mkdir(path, options) {
 /**
  * Creates a temporary directory.
  * @param {string} [label]
+ * @returns {string}
  */
 export function mkdirTemp(label = Math.random().toString(36).slice(2)) {
   const tmpPath = getTmpdir();
   const prefixPath = join(tmpPath, `${label}-`);
   printCommand("mktemp", ["-d", prefixPath]);
-  fs.mkdtempSync(prefixPath, { recursive: true });
+  return fs.mkdtempSync(prefixPath, { recursive: true });
 }
 
 /**

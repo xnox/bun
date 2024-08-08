@@ -47,6 +47,8 @@ import {
   symlinkFile,
   gitClone,
   buildkiteDownloadArtifact,
+  mkdirTemp,
+  getGitPullRequest,
 } from "./util.mjs";
 
 async function main() {
@@ -1022,6 +1024,13 @@ async function cmakeGenerateBunBuild(options, target) {
     assertions && "-DENABLE_LOGS=true",
   ];
 
+  if (isCI) {
+    const pullRequest = getGitPullRequest();
+    if (pullRequest) {
+      flags.push(`-DPULL_REQUEST=${pullRequest}`);
+    }
+  }
+
   if (target === "cpp") {
     flags.push("-DBUN_CPP_ONLY=ON");
   } else if (target === "zig") {
@@ -1944,6 +1953,23 @@ async function cargoBuild(options) {
 }
 
 /**
+ * @param {BuildOptions} options
+ * @param {string} [label]
+ * @returns {string}
+ */
+function getCachePath(options, label) {
+  const { cwd, cachePath, cacheStrategy } = options;
+
+  // If caching is disabled, create a throw-away temporary directory
+  // to make sure that the cache is not re-used.
+  if (cacheStrategy === "none") {
+    return mkdirTemp(label);
+  }
+
+  return join(cachePath || join(cwd, ".cache"), label);
+}
+
+/**
  * Environment variables.
  */
 
@@ -1993,9 +2019,8 @@ function getBuildEnv(options) {
  * @returns {Record<string, string>}
  */
 function getCcacheEnv(options) {
-  const { cwd, cachePath, cacheStrategy, artifact } = options;
-  const ccacheBasePath = cachePath || join(cwd, ".cache");
-  const ccachePath = join(ccacheBasePath, "ccache");
+  const { cwd, cacheStrategy, artifact } = options;
+  const ccachePath = getCachePath(options, "ccache");
 
   // https://ccache.dev/manual/4.8.2.html#_configuration_options
   const env = {
@@ -2034,18 +2059,13 @@ function getCcacheEnv(options) {
  * @returns {Record<string, string>}
  */
 function getZigEnv(options) {
-  const { cwd, cachePath, buildPath } = options;
-  const zigBasePath = cachePath || join(cwd, ".cache");
-  const zigCachePath = join(zigBasePath, "zig-cache");
-
-  // TODO: zig-cache is not realiable in CI due to concurrent access
-  // For example, sometimes it will just hang the build forever.
+  let zigCachePath;
   if (isCI) {
-    const tmpZigCachePath = join(buildPath, "zig-cache");
-    return {
-      "ZIG_CACHE_DIR": tmpZigCachePath,
-      "ZIG_GLOBAL_CACHE_DIR": tmpZigCachePath,
-    };
+    // TODO: Zig's cache is not realiable in CI due to concurrent access
+    // For example, sometimes it will just hang the build forever.
+    zigCachePath = getCachePath({ ...options, cacheStrategy: "none" }, "zig-cache");
+  } else {
+    zigCachePath = getCachePath(options, "zig-cache");
   }
 
   return {
@@ -2060,9 +2080,7 @@ function getZigEnv(options) {
  * @returns {Record<string, string>}
  */
 function getBunEnv(options) {
-  const { cachePath, cwd } = options;
-  const bunBasePath = cachePath || join(cwd, ".cache");
-  const bunCachePath = join(bunBasePath, "bun-install");
+  const bunCachePath = getCachePath(options, "bun-install");
 
   return {
     "BUN_FEATURE_FLAG_INTERNAL_FOR_TESTING": "1",
@@ -2133,12 +2151,22 @@ function getZigTarget(options) {
  */
 function getZigOptimize(options) {
   const { debug, assertions, os } = options;
+
   if (debug) {
     return "Debug";
   }
-  if (assertions || os === "windows") {
+
+  if (assertions) {
     return "ReleaseSafe";
   }
+
+  // The release mode is Windows has historically been "ReleaseSafe"
+  // since it was helpful to catch bugs when adding Bundows support.
+  // We could revisit this in the future.
+  if (os === "windows") {
+    return "ReleaseSafe";
+  }
+
   return "ReleaseFast";
 }
 
@@ -2149,12 +2177,15 @@ function getZigOptimize(options) {
  */
 function getCpuTarget(options) {
   const { arch, baseline } = options;
+
   if (baseline) {
     return "nehalem";
   }
+
   if (arch === "x64") {
     return "haswell";
   }
+
   return "native";
 }
 

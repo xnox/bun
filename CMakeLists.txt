@@ -24,8 +24,12 @@ if(NOT BUILD)
 endif()
 
 # Used in --revision to show the build number, if a pull request
-if(NOT BUILD_NUMBER)
-    set(BUILD_NUMBER "0")
+if(NOT BUILD_ID)
+    set(BUILD_ID "0")
+endif()
+
+if(NOT PULL_REQUEST)
+    set(PULL_REQUEST "0")
 endif()
 
 # WebKit uses -std=gnu++20 on non-macOS non-Windows
@@ -957,8 +961,8 @@ if(NOT BUN_LINK_ONLY AND NOT BUN_CPP_ONLY)
         "-Dtarget=${ZIG_TARGET}"
         "-Denable_logs=${ENABLE_LOGS}"
         "-Dreported_nodejs_version=${REPORTED_NODEJS_VERSION}"
-        "-Dbuild_number=${BUILD_NUMBER}"
-        "-Dbuild=${BUILD}"
+        "-Dbuild_id=${BUILD_ID}"
+        "-Dpull_request=${PULL_REQUEST}"
         "-Dobj_format=${BUN_ZIG_OBJ_FORMAT}"
         DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/build.zig"
