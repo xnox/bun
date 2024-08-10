@@ -132,7 +132,7 @@ endif()
 if(WIN32 OR APPLE)
     set(LLVM_VERSION 18)
 else()
-    set(LLVM_VERSION 16)
+    set(LLVM_VERSION 18)
 endif()
 
 macro(BUN_FIND_LLVM)
